@@ -1,0 +1,26 @@
+{
+  "name": "visual-proga",
+  "version": "1.0.0",
+  "description": "",
+  "main": "lab1.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dra1nerrr/Visual-Proga.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/dra1nerrr/Visual-Proga/issues"
+  },
+  "homepage": "https://github.com/dra1nerrr/Visual-Proga#readme",
+  "devDependencies": {
+    "@types/node": "^25.2.3",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.18"
+  }
+}
