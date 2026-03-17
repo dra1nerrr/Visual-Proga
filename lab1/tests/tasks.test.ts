@@ -13,7 +13,6 @@ import {
     type Status
 } from '../src/tasks'
 
-// ========== ТЕСТЫ ДЛЯ ЗАДАНИЯ 1 ==========
 describe('Задание 1: createUser', () => {
     it('должен создавать пользователя со всеми полями', () => {
         const user = createUser(1, 'Иван Иванов', 'ivan@mail.ru', true)
@@ -46,7 +45,6 @@ describe('Задание 1: createUser', () => {
     })
 })
 
-// ========== ТЕСТЫ ДЛЯ ЗАДАНИЯ 2 ==========
 describe('Задание 2: createBook', () => {
     it('должен создавать книгу с годом издания', () => {
         const book: Book = {
@@ -95,7 +93,6 @@ describe('Задание 2: createBook', () => {
     })
 })
 
-// ========== ТЕСТЫ ДЛЯ ЗАДАНИЯ 3 ==========
 describe('Задание 3: calculateArea', () => {
     it('должен правильно вычислять площадь круга', () => {
         const radius = 5
@@ -117,7 +114,6 @@ describe('Задание 3: calculateArea', () => {
     })
 })
 
-// ========== ТЕСТЫ ДЛЯ ЗАДАНИЯ 4 ==========
 describe('Задание 4: getStatusColor', () => {
     it('должен возвращать green для active статуса', () => {
         expect(getStatusColor('active')).toBe('green')
@@ -139,7 +135,6 @@ describe('Задание 4: getStatusColor', () => {
     })
 })
 
-// ========== ТЕСТЫ ДЛЯ ЗАДАНИЯ 5 ==========
 describe('Задание 5: StringFormatter', () => {
     describe('capitalizeFirst', () => {
         it('должен делать первую букву заглавной', () => {
@@ -178,7 +173,6 @@ describe('Задание 5: StringFormatter', () => {
     })
 })
 
-// ========== ТЕСТЫ ДЛЯ ЗАДАНИЯ 6 ==========
 describe('Задание 6: getFirstElement', () => {
     it('должен возвращать первый элемент массива чисел', () => {
         expect(getFirstElement([1, 2, 3])).toBe(1)
@@ -199,7 +193,6 @@ describe('Задание 6: getFirstElement', () => {
     })
 })
 
-// ========== ТЕСТЫ ДЛЯ ЗАДАНИЯ 7 ==========
 describe('Задание 7: findById', () => {
     const testItems = [
         { id: 1, name: 'Первый' },

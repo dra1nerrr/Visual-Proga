@@ -1,4 +1,3 @@
-// ========== ЗАДАНИЕ 1 ==========
 export interface User {
     id: number;
     name: string;
@@ -10,7 +9,6 @@ export function createUser(id: number, name: string, email?: string, isActive: b
     return { id, name, email, isActive };
 }
 
-// ========== ЗАДАНИЕ 2 ==========
 export interface Book {
     title: string;
     author: string;
@@ -22,7 +20,6 @@ export function createBook(book: Book): Book {
     return book;
 }
 
-// ========== ЗАДАНИЕ 3 ==========
 export function calculateArea(shape: 'circle', radius: number): number;
 export function calculateArea(shape: 'square', side: number): number;
 export function calculateArea(shape: 'circle' | 'square', param: number): number {
@@ -33,7 +30,6 @@ export function calculateArea(shape: 'circle' | 'square', param: number): number
     }
 }
 
-// ========== ЗАДАНИЕ 4 ==========
 export type Status = 'active' | 'inactive' | 'new';
 
 export function getStatusColor(status: Status): string {
@@ -42,7 +38,6 @@ export function getStatusColor(status: Status): string {
     return 'blue';
 }
 
-// ========== ЗАДАНИЕ 5 ==========
 export type StringFormatter = (str: string, uppercase?: boolean) => string;
 
 export const capitalizeFirst: StringFormatter = (str, uppercase = false) => {
@@ -57,12 +52,10 @@ export const trimAndFormat: StringFormatter = (str, uppercase = false) => {
     return result;
 };
 
-// ========== ЗАДАНИЕ 6 ==========
 export function getFirstElement<T>(arr: T[]): T | undefined {
     return arr.length > 0 ? arr[0] : undefined;
 }
 
-// ========== ЗАДАНИЕ 7 ==========
 export interface HasId {
     id: number;
 }
