@@ -1,0 +1,17 @@
+{
+  "name": "typescript-lab5",
+  "version": "1.0.0",
+  "description": "TypeScript lab5 with typed query pipeline",
+  "scripts": {
+    "test": "vitest",
+    "test:run": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "build": "tsc",
+    "type-check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "vitest": "^1.0.0",
+    "typescript": "^5.0.0",
+    "@types/node": "^20.0.0"
+  }
+}

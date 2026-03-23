@@ -1,0 +1,9 @@
+{
+  "name": "typescript-labs",
+  "version": "1.0.0",
+  "scripts": {
+    "test:lab1": "cd lab1 && npm run test:run",
+    "test:lab5": "cd lab5 && npm run test:run",
+    "test:all": "npm run test:lab1 && npm run test:lab5"
+  }
+}

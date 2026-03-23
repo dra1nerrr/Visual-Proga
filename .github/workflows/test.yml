@@ -1,0 +1,54 @@
+name: Run Tests
+
+on:
+  push:
+    branches: [ lab1, lab3, lab4, lab5, master ]
+
+jobs:
+  test-lab1:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
+        with:
+          node-version: 18
+      - run: npm install
+        working-directory: ./lab1
+      - run: npm run test:run
+        working-directory: ./lab1
+
+  test-lab3:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
+        with:
+          node-version: 18
+      - run: npm install
+        working-directory: ./lab3
+      - run: npm run test:run
+        working-directory: ./lab3
+
+  test-lab4:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
+        with:
+          node-version: 18
+      - run: npm install
+        working-directory: ./lab4
+      - run: npm run test:run
+        working-directory: ./lab4
+
+  test-lab5:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
+        with:
+          node-version: 18
+      - run: npm install
+        working-directory: ./lab5
+      - run: npm run test:run
+        working-directory: ./lab5
