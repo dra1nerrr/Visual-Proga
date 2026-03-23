@@ -1,0 +1,16 @@
+{
+  "name": "typescript-lab6",
+  "version": "1.0.0",
+  "description": "TypeScript lab6 - utility types",
+  "scripts": {
+    "test": "vitest",
+    "test:run": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "type-check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "vitest": "^1.6.1",
+    "typescript": "^5.0.0",
+    "@types/node": "^20.0.0"
+  }
+}
