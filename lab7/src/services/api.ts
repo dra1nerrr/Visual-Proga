@@ -1,17 +1,33 @@
-import { Book } from '../types/book';
+import { Book, GoogleBookResponse } from '../types/book';
 
-const mockBooks: Book[] = [
-    { id: 1, title: "Война и мир", isbn: "9785170913637", pageCount: 1280, authors: ["Лев Толстой"] },
-    { id: 2, title: "Преступление и наказание", isbn: "9785171185585", pageCount: 672, authors: ["Фёдор Достоевский"] },
-    { id: 3, title: "Мастер и Маргарита", isbn: "9785170913590", pageCount: 480, authors: ["Михаил Булгаков"] },
-    { id: 4, title: "Анна Каренина", isbn: "9785170913613", pageCount: 896, authors: ["Лев Толстой"] },
-    { id: 5, title: "Евгений Онегин", isbn: "9785170913620", pageCount: 320, authors: ["Александр Пушкин"] }
-];
+const BOOKS_API = 'https://fakeapi.extendsclass.com/books';
+const GOOGLE_BOOKS_API = 'https://www.googleapis.com/books/v1/volumes';
+const PROXY = 'https://cors-anywhere.herokuapp.com/';
 
 export async function fetchBooks(): Promise<Book[]> {
-    return mockBooks;
+    const response = await fetch(BOOKS_API);
+    return await response.json();
 }
 
-export async function fetchBookCover(id: number): Promise<string | null> {
-    return `/covers/${id}.jpg`;
+export async function fetchBookCover(isbn: string, title: string): Promise<string | null> {
+    try {
+        let response = await fetch(`${GOOGLE_BOOKS_API}?q=isbn:${isbn}`);
+        let data: GoogleBookResponse = await response.json();
+
+        if (!data.items || data.items.length === 0) {
+            response = await fetch(`${GOOGLE_BOOKS_API}?q=intitle:${encodeURIComponent(title)}`);
+            data = await response.json();
+        }
+
+        const imageUrl = data.items?.[0]?.volumeInfo?.imageLinks?.thumbnail?.replace('http:', 'https:');
+
+        if (imageUrl) {
+            const imageResponse = await fetch(PROXY + imageUrl);
+            const blob = await imageResponse.blob();
+            return URL.createObjectURL(blob);
+        }
+    } catch (e) {
+        console.error(e);
+    }
+    return null;
 }
