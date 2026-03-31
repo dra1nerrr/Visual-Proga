@@ -10,26 +10,31 @@ function App() {
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
-        const loadBooks = async () => {
-            const booksData = await fetchBooks();
-            setBooks(booksData);
-            
-            const coverMap = new Map<number, string>();
-            for (const book of booksData) {
-                const cover = await fetchBookCover(book.id);
-                if (cover) {
-                    coverMap.set(book.id, cover);
-                }
+        const loadData = async () => {
+            try {
+                const booksData = await fetchBooks();
+                setBooks(booksData);
+                
+                const coverMap = new Map<number, string>();
+                
+                await Promise.all(booksData.map(async (book) => {
+                    const blobUrl = await fetchBookCover(book.isbn, book.title);
+                    if (blobUrl) {
+                        coverMap.set(book.id, blobUrl);
+                    }
+                }));
+                
+                setCovers(coverMap);
+            } finally {
+                setLoading(false);
             }
-            setCovers(coverMap);
-            setLoading(false);
         };
         
-        loadBooks();
+        loadData();
     }, []);
 
     if (loading) {
-        return <div className="loading">Загрузка книг...</div>;
+        return <div className="loading">Загрузка...</div>;
     }
 
     return (
