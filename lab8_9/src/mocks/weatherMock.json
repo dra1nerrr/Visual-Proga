@@ -1,0 +1,18 @@
+{
+  "forecast": {
+    "city": { "name": "Moscow" },
+    "list": [
+      {
+        "dt": 1712052000,
+        "main": { "temp": 27, "temp_min": 25, "temp_max": 28, "humidity": 80, "pressure": 1012 },
+        "weather": [{ "icon": "01d", "description": "clear sky" }],
+        "wind": { "speed": 5 },
+        "clouds": { "all": 0 },
+        "sys": { "pod": "d" }
+      }
+    ]
+  },
+  "air": {
+    "list": [{ "main": { "aqi": 1 } }]
+  }
+}

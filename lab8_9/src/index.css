@@ -1,0 +1,70 @@
+:root {
+  --bg-day: linear-gradient(180deg, #5B86E5 0%, #36D1DC 100%);
+  --bg-night: linear-gradient(180deg, #0F172A 0%, #1E293B 100%);
+  --glass: rgba(255, 255, 255, 0.15);
+}
+
+body {
+  margin: 0;
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  min-height: 100vh;
+  color: white;
+}
+
+.app-container {
+  min-height: 100vh;
+  padding: 20px;
+  display: flex;
+  justify-content: center;
+  transition: background 0.5s ease;
+}
+
+.day { background: var(--bg-day); }
+.night { background: var(--bg-night); }
+
+.content-wrapper {
+  width: 100%;
+  max-width: 400px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.card {
+  background: var(--glass);
+  backdrop-filter: blur(10px);
+  border-radius: 24px;
+  padding: 20px;
+}
+
+.search-input {
+  width: 100%;
+  padding: 12px 20px;
+  border-radius: 15px;
+  border: none;
+  background: var(--glass);
+  color: white;
+  box-sizing: border-box;
+}
+
+.weather-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.temp-big {
+  font-size: 5rem;
+  font-weight: bold;
+  margin: 0;
+}
+
+.forecast-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.forecast-row:last-child { border: none; }
