@@ -1,6 +1,7 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { BrowserRouter, Routes, Route, Link, useNavigate, useParams, useLocation, Navigate, Outlet } from 'react-router-dom';
 import { Provider, useDispatch, useSelector } from 'react-redux';
-import { configureStore, createSlice, createAsyncThunk, PayloadAction } from '@reduxjs/toolkit';
+import { configureStore, createSlice, createAsyncThunk, PayloadAction, combineReducers } from '@reduxjs/toolkit';
 import './App.css';
 
 const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
@@ -10,6 +11,13 @@ const defaultCols = 26;
 interface CellData {
   raw: string;
   res: string;
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  bgColor?: string;
+  textColor?: string;
+  align?: 'left' | 'center' | 'right';
+  format?: 'number' | 'percent' | 'currency' | 'date';
 }
 
 interface Document {
@@ -20,23 +28,97 @@ interface Document {
   rows: number;
   cols: number;
   data: Record<string, CellData>;
+  userId: number;
 }
 
-let columnWidthsStore: Record<string, number> = {};
+interface User {
+  id: number;
+  name: string;
+  email: string;
+  password: string;
+  createdAt: string;
+}
 
-const loadColumnWidths = () => {
-  const saved = localStorage.getItem('column_widths');
-  if (saved) {
-    columnWidthsStore = JSON.parse(saved);
+interface AuthState {
+  user: Omit<User, 'password'> | null;
+  token: string | null;
+  isAuthenticated: boolean;
+  loading: boolean;
+  error: string | null;
+}
+
+interface DocumentsState {
+  list: Document[];
+  currentId: number | null;
+  currentName: string;
+  loading: boolean;
+  error: string | null;
+}
+
+interface SpreadsheetState {
+  data: Record<string, CellData>;
+  rows: number;
+  cols: number;
+  selectedCell: string;
+  selectedRange: string | null;
+  history: Record<string, CellData>[][];
+  historyIndex: number;
+  saveStatus: 'saved' | 'saving' | 'error';
+  clipboard: { data: Record<string, CellData>; action: 'copy' | 'cut' } | null;
+}
+
+interface UIState {
+  modalOpen: boolean;
+  newDocName: string;
+  newDocRows: number;
+  newDocCols: number;
+  contextMenu: { show: boolean; x: number; y: number; row: number | null };
+  showFormatPanel: boolean;
+  confirmDialog: { show: boolean; message: string; onConfirm: () => void; onCancel: () => void } | null;
+}
+
+const loadUsers = (): User[] => {
+  const stored = localStorage.getItem('spreadsheet_users');
+  if (stored) {
+    return JSON.parse(stored);
   }
+  return [];
 };
 
-const createEmptyData = (rows: number, cols: number): Record<string, CellData> => {
+const saveUsers = (users: User[]) => {
+  localStorage.setItem('spreadsheet_users', JSON.stringify(users));
+};
+
+const loadDocuments = (): Document[] => {
+  const stored = localStorage.getItem('spreadsheet_documents');
+  if (stored) {
+    return JSON.parse(stored);
+  }
+  return [];
+};
+
+const saveDocuments = (docs: Document[]) => {
+  localStorage.setItem('spreadsheet_documents', JSON.stringify(docs));
+};
+
+const createEmptyCell = (): CellData => ({
+  raw: '',
+  res: '',
+  bold: false,
+  italic: false,
+  underline: false,
+  bgColor: '#ffffff',
+  textColor: '#000000',
+  align: 'left',
+  format: 'number',
+});
+
+const createEmptyDocumentData = (rows: number, cols: number): Record<string, CellData> => {
   const empty: Record<string, CellData> = {};
   for (let i = 0; i < rows; i++) {
     for (let j = 0; j < Math.min(cols, alphabet.length); j++) {
       const id = alphabet[j] + (i + 1);
-      empty[id] = { raw: '', res: '' };
+      empty[id] = createEmptyCell();
     }
   }
   return empty;
@@ -77,7 +159,7 @@ const averageRange = (data: Record<string, CellData>, range: string): number => 
 const calculateFormula = (data: Record<string, CellData>, formula: string): string => {
   if (!formula || formula[0] !== '=') return formula;
   let expr = formula.slice(1).toUpperCase();
-  
+
   let sumMatch = expr.match(/SUM\([A-Z]+\d+:[A-Z]+\d+\)/);
   while (sumMatch) {
     const rng = sumMatch[0].slice(4, -1);
@@ -85,7 +167,7 @@ const calculateFormula = (data: Record<string, CellData>, formula: string): stri
     expr = expr.replace(sumMatch[0], val.toString());
     sumMatch = expr.match(/SUM\([A-Z]+\d+:[A-Z]+\d+\)/);
   }
-  
+
   let avgMatch = expr.match(/AVERAGE\([A-Z]+\d+:[A-Z]+\d+\)/);
   while (avgMatch) {
     const rng = avgMatch[0].slice(8, -1);
@@ -93,7 +175,7 @@ const calculateFormula = (data: Record<string, CellData>, formula: string): stri
     expr = expr.replace(avgMatch[0], val.toString());
     avgMatch = expr.match(/AVERAGE\([A-Z]+\d+:[A-Z]+\d+\)/);
   }
-  
+
   const refs = expr.match(/[A-Z]+\d+/g);
   if (refs) {
     for (const ref of refs) {
@@ -102,7 +184,7 @@ const calculateFormula = (data: Record<string, CellData>, formula: string): stri
       expr = expr.replace(re, val);
     }
   }
-  
+
   try {
     const result = eval(expr);
     return String(result);
@@ -124,212 +206,509 @@ const recalculateAll = (data: Record<string, CellData>): Record<string, CellData
   return newData;
 };
 
-export const loadDocuments = createAsyncThunk(
+const formatCellValue = (value: string, format?: string): string => {
+  const num = parseFloat(value);
+  if (isNaN(num)) return value;
+
+  switch (format) {
+    case 'percent': return (num * 100).toFixed(2) + '%';
+    case 'currency': return '₽' + num.toFixed(2);
+    case 'date': return new Date(num).toLocaleDateString('ru-RU');
+    default: return value;
+  }
+};
+
+const generateToken = (userId: number): string => {
+  return 'token_' + userId + '_' + Date.now() + '_' + Math.random();
+};
+
+const verifyToken = (token: string): { valid: boolean; userId?: number } => {
+  const parts = token.split('_');
+  if (parts[0] === 'token' && parts[1]) {
+    return { valid: true, userId: parseInt(parts[1]) };
+  }
+  return { valid: false };
+};
+
+const authSlice = createSlice({
+  name: 'auth',
+  initialState: {
+    user: null as Omit<User, 'password'> | null,
+    token: null as string | null,
+    isAuthenticated: false,
+    loading: false,
+    error: null as string | null,
+  } as AuthState,
+  reducers: {
+    setLoading: (state, action: PayloadAction<boolean>) => {
+      state.loading = action.payload;
+    },
+    setError: (state, action: PayloadAction<string | null>) => {
+      state.error = action.payload;
+    },
+    loginSuccess: (state, action: PayloadAction<{ user: Omit<User, 'password'>; token: string }>) => {
+      state.user = action.payload.user;
+      state.token = action.payload.token;
+      state.isAuthenticated = true;
+      state.loading = false;
+      state.error = null;
+    },
+    logout: (state) => {
+      state.user = null;
+      state.token = null;
+      state.isAuthenticated = false;
+      state.loading = false;
+      state.error = null;
+    },
+    clearError: (state) => {
+      state.error = null;
+    },
+  },
+});
+
+export const loginUser = createAsyncThunk(
+  'auth/login',
+  async ({ email, password }: { email: string; password: string }, { dispatch, rejectWithValue }) => {
+    dispatch(authSlice.actions.setLoading(true));
+    try {
+      await new Promise(resolve => setTimeout(resolve, 300));
+      const users = loadUsers();
+      const user = users.find(u => u.email === email && u.password === password);
+      if (!user) {
+        throw new Error('Неверный email или пароль');
+      }
+      const token = generateToken(user.id);
+      const { password: _, ...userWithoutPassword } = user;
+      dispatch(authSlice.actions.loginSuccess({ user: userWithoutPassword, token }));
+      return { user: userWithoutPassword, token };
+    } catch (error: any) {
+      dispatch(authSlice.actions.setError(error.message));
+      return rejectWithValue(error.message);
+    } finally {
+      dispatch(authSlice.actions.setLoading(false));
+    }
+  }
+);
+
+export const registerUser = createAsyncThunk(
+  'auth/register',
+  async ({ name, email, password }: { name: string; email: string; password: string }, { dispatch, rejectWithValue }) => {
+    dispatch(authSlice.actions.setLoading(true));
+    try {
+      await new Promise(resolve => setTimeout(resolve, 300));
+      const users = loadUsers();
+      const existing = users.find(u => u.email === email);
+      if (existing) {
+        throw new Error('Пользователь с таким email уже существует');
+      }
+      const newUser: User = {
+        id: Date.now(),
+        name,
+        email,
+        password,
+        createdAt: new Date().toISOString(),
+      };
+      users.push(newUser);
+      saveUsers(users);
+      const token = generateToken(newUser.id);
+      const { password: _, ...userWithoutPassword } = newUser;
+
+      // Создаём пустую таблицу для нового пользователя
+      const emptyData = createEmptyDocumentData(defaultRows, defaultCols);
+      const firstDoc: Document = {
+        id: Date.now() + 1,
+        name: 'Моя первая таблица',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        rows: defaultRows,
+        cols: defaultCols,
+        data: emptyData,
+        userId: newUser.id,
+      };
+      const docs = loadDocuments();
+      docs.push(firstDoc);
+      saveDocuments(docs);
+
+      dispatch(authSlice.actions.loginSuccess({ user: userWithoutPassword, token }));
+      return { user: userWithoutPassword, token };
+    } catch (error: any) {
+      dispatch(authSlice.actions.setError(error.message));
+      return rejectWithValue(error.message);
+    } finally {
+      dispatch(authSlice.actions.setLoading(false));
+    }
+  }
+);
+
+export const changePassword = createAsyncThunk(
+  'auth/changePassword',
+  async ({ userId, oldPassword, newPassword }: { userId: number; oldPassword: string; newPassword: string }, { rejectWithValue }) => {
+    await new Promise(resolve => setTimeout(resolve, 300));
+    const users = loadUsers();
+    const userIndex = users.findIndex(u => u.id === userId);
+    if (userIndex === -1) {
+      throw new Error('Пользователь не найден');
+    }
+    if (users[userIndex].password !== oldPassword) {
+      throw new Error('Неверный старый пароль');
+    }
+    users[userIndex].password = newPassword;
+    saveUsers(users);
+    return;
+  }
+);
+
+export const updateUserName = createAsyncThunk(
+  'auth/updateName',
+  async ({ userId, newName }: { userId: number; newName: string }, { rejectWithValue }) => {
+    await new Promise(resolve => setTimeout(resolve, 300));
+    const users = loadUsers();
+    const userIndex = users.findIndex(u => u.id === userId);
+    if (userIndex === -1) {
+      throw new Error('Пользователь не найден');
+    }
+    users[userIndex].name = newName;
+    saveUsers(users);
+    return newName;
+  }
+);
+
+export const loadUserDocuments = createAsyncThunk(
   'documents/load',
-  async () => {
-    loadColumnWidths();
-    const saved = localStorage.getItem('my_docs');
-    let allDocs = saved ? JSON.parse(saved) : [];
-    
-    if (!allDocs.length) {
-      const empty = createEmptyData(defaultRows, defaultCols);
-      const firstDoc = {
+  async (_, { getState, rejectWithValue }) => {
+    const state = getState() as RootState;
+    const userId = state.auth.user?.id;
+    if (!userId) {
+      return rejectWithValue('Не авторизован');
+    }
+    await new Promise(resolve => setTimeout(resolve, 200));
+    const allDocs = loadDocuments();
+    let userDocs = allDocs.filter(doc => doc.userId === userId);
+    if (userDocs.length === 0) {
+      const emptyData = createEmptyDocumentData(defaultRows, defaultCols);
+      const newDoc: Document = {
         id: Date.now(),
         name: 'Моя таблица',
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
         rows: defaultRows,
         cols: defaultCols,
-        data: empty,
+        data: emptyData,
+        userId: userId,
       };
-      allDocs = [firstDoc];
-      localStorage.setItem('my_docs', JSON.stringify(allDocs));
+      userDocs = [newDoc];
+      allDocs.push(newDoc);
+      saveDocuments(allDocs);
     }
-    
-    return allDocs;
+    return userDocs;
   }
 );
 
 export const loadDocumentById = createAsyncThunk(
   'documents/loadById',
-  async (id: number, { dispatch, getState }) => {
-    const state = getState() as any;
-    const doc = state.documents.list.find((d: Document) => d.id === id);
-    if (!doc) throw new Error('Документ не найден');
-    dispatch(spreadsheetSlice.actions.loadData({ data: doc.data, rows: doc.rows, cols: doc.cols }));
-    return { id, name: doc.name };
+  async ({ id, token }: { id: number; token: string }, { getState, rejectWithValue }) => {
+    const verification = verifyToken(token);
+    if (!verification.valid || !verification.userId) {
+      return rejectWithValue('Неверный токен');
+    }
+    await new Promise(resolve => setTimeout(resolve, 200));
+    const allDocs = loadDocuments();
+    const doc = allDocs.find(d => d.id === id);
+    if (!doc) {
+      return rejectWithValue('Документ не найден');
+    }
+    if (doc.userId !== verification.userId) {
+      return rejectWithValue('403');
+    }
+    return doc;
   }
 );
 
-export const saveDocument = createAsyncThunk(
+export const saveDocumentToStorage = createAsyncThunk(
   'documents/save',
-  async (_, { getState, dispatch }) => {
-    const state = getState() as any;
-    const currentId = state.documents.currentId;
-    const data = state.spreadsheet.data;
-    const rows = state.spreadsheet.rows;
-    const cols = state.spreadsheet.cols;
-    const list = state.documents.list;
-    
-    if (!currentId) return;
-    
-    const updated = list.map((doc: Document) => {
-      if (doc.id === currentId) {
-        return { ...doc, data, rows, cols, updatedAt: new Date().toISOString() };
-      }
-      return doc;
-    });
-    
-    localStorage.setItem('my_docs', JSON.stringify(updated));
-    dispatch(spreadsheetSlice.actions.setSaveStatus('Сохранено'));
-    return updated;
+  async ({ id, data, rows, cols, name, token }: { id: number; data: Record<string, CellData>; rows: number; cols: number; name: string; token: string }, { getState, rejectWithValue }) => {
+    const verification = verifyToken(token);
+    if (!verification.valid || !verification.userId) {
+      return rejectWithValue('Неверный токен');
+    }
+    await new Promise(resolve => setTimeout(resolve, 200));
+    const allDocs = loadDocuments();
+    const docIndex = allDocs.findIndex(d => d.id === id);
+    if (docIndex === -1) {
+      return rejectWithValue('Документ не найден');
+    }
+    if (allDocs[docIndex].userId !== verification.userId) {
+      return rejectWithValue('403');
+    }
+    const updatedDoc: Document = {
+      ...allDocs[docIndex],
+      data,
+      rows,
+      cols,
+      name,
+      updatedAt: new Date().toISOString(),
+    };
+    allDocs[docIndex] = updatedDoc;
+    saveDocuments(allDocs);
+    return updatedDoc;
   }
 );
 
-export const createDocument = createAsyncThunk(
+export const createDocumentInStorage = createAsyncThunk(
   'documents/create',
-  async ({ name, rows, cols }: { name: string; rows: number; cols: number }, { dispatch, getState }) => {
-    const empty = createEmptyData(rows, cols);
-    const newDoc = {
+  async ({ name, rows, cols, token }: { name: string; rows: number; cols: number; token: string }, { rejectWithValue }) => {
+    const verification = verifyToken(token);
+    if (!verification.valid || !verification.userId) {
+      return rejectWithValue('Неверный токен');
+    }
+    await new Promise(resolve => setTimeout(resolve, 200));
+    const emptyData = createEmptyDocumentData(rows, cols);
+    const newDoc: Document = {
       id: Date.now(),
       name,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       rows,
       cols: Math.min(cols, alphabet.length),
-      data: empty,
+      data: emptyData,
+      userId: verification.userId,
     };
-    
-    const state = getState() as any;
-    const newList = [...state.documents.list, newDoc];
-    localStorage.setItem('my_docs', JSON.stringify(newList));
-    
-    dispatch(spreadsheetSlice.actions.loadData({ data: empty, rows, cols: Math.min(cols, alphabet.length) }));
-    return newList;
+    const allDocs = loadDocuments();
+    allDocs.push(newDoc);
+    saveDocuments(allDocs);
+    const userDocs = allDocs.filter(doc => doc.userId === verification.userId);
+    return { newDoc, userDocs };
   }
 );
 
-export const deleteDocument = createAsyncThunk(
+export const deleteDocumentFromStorage = createAsyncThunk(
   'documents/delete',
-  async (id: number, { getState, dispatch }) => {
-    const state = getState() as any;
-    const newList = state.documents.list.filter((d: Document) => d.id !== id);
-    localStorage.setItem('my_docs', JSON.stringify(newList));
-    
-    if (state.documents.currentId === id && newList.length > 0) {
-      dispatch(loadDocumentById(newList[0].id));
+  async ({ id, token }: { id: number; token: string }, { rejectWithValue }) => {
+    const verification = verifyToken(token);
+    if (!verification.valid || !verification.userId) {
+      return rejectWithValue('Неверный токен');
     }
-    return newList;
+    await new Promise(resolve => setTimeout(resolve, 200));
+    const allDocs = loadDocuments();
+    const docIndex = allDocs.findIndex(d => d.id === id);
+    if (docIndex === -1) {
+      return rejectWithValue('Документ не найден');
+    }
+    if (allDocs[docIndex].userId !== verification.userId) {
+      return rejectWithValue('403');
+    }
+    allDocs.splice(docIndex, 1);
+    saveDocuments(allDocs);
+    const userDocs = allDocs.filter(doc => doc.userId === verification.userId);
+    return userDocs;
   }
 );
 
-export const renameDocument = createAsyncThunk(
+export const renameDocumentInStorage = createAsyncThunk(
   'documents/rename',
-  async ({ id, newName }: { id: number; newName: string }, { getState }) => {
-    if (!newName) return;
-    const state = getState() as any;
-    const newList = state.documents.list.map((doc: Document) => {
-      if (doc.id === id) {
-        return { ...doc, name: newName, updatedAt: new Date().toISOString() };
-      }
-      return doc;
-    });
-    localStorage.setItem('my_docs', JSON.stringify(newList));
-    return { newList, id, newName };
+  async ({ id, newName, token }: { id: number; newName: string; token: string }, { rejectWithValue }) => {
+    const verification = verifyToken(token);
+    if (!verification.valid || !verification.userId) {
+      return rejectWithValue('Неверный токен');
+    }
+    await new Promise(resolve => setTimeout(resolve, 200));
+    const allDocs = loadDocuments();
+    const docIndex = allDocs.findIndex(d => d.id === id);
+    if (docIndex === -1) {
+      return rejectWithValue('Документ не найден');
+    }
+    if (allDocs[docIndex].userId !== verification.userId) {
+      return rejectWithValue('403');
+    }
+    allDocs[docIndex].name = newName;
+    allDocs[docIndex].updatedAt = new Date().toISOString();
+    saveDocuments(allDocs);
+    const userDocs = allDocs.filter(doc => doc.userId === verification.userId);
+    return { userDocs, id, newName };
   }
 );
 
-export const duplicateDocument = createAsyncThunk(
+export const duplicateDocumentInStorage = createAsyncThunk(
   'documents/duplicate',
-  async (id: number, { getState }) => {
-    const state = getState() as any;
-    const original = state.documents.list.find((d: Document) => d.id === id);
-    if (!original) return;
-    
-    const copy = {
+  async ({ id, token }: { id: number; token: string }, { getState, rejectWithValue }) => {
+    const verification = verifyToken(token);
+    if (!verification.valid || !verification.userId) {
+      return rejectWithValue('Неверный токен');
+    }
+    await new Promise(resolve => setTimeout(resolve, 200));
+    const allDocs = loadDocuments();
+    const original = allDocs.find(d => d.id === id);
+    if (!original || original.userId !== verification.userId) {
+      return rejectWithValue('Документ не найден или нет доступа');
+    }
+    const copy: Document = {
       ...original,
       id: Date.now(),
       name: original.name + ' - копия',
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
-    
-    const newList = [...state.documents.list, copy];
-    localStorage.setItem('my_docs', JSON.stringify(newList));
-    return newList;
+    allDocs.push(copy);
+    saveDocuments(allDocs);
+    const userDocs = allDocs.filter(doc => doc.userId === verification.userId);
+    return userDocs;
   }
 );
 
 const spreadsheetSlice = createSlice({
   name: 'spreadsheet',
   initialState: {
-    data: createEmptyData(defaultRows, defaultCols),
+    data: createEmptyDocumentData(defaultRows, defaultCols),
     rows: defaultRows,
     cols: defaultCols,
     selectedCell: 'A1',
     selectedRange: null as string | null,
-    history: [] as Record<string, CellData>[],
+    history: [] as Record<string, CellData>[][],
     historyIndex: -1,
-    saveStatus: 'Сохранено',
-  },
+    saveStatus: 'saved' as 'saved' | 'saving' | 'error',
+    clipboard: null as { data: Record<string, CellData>; action: 'copy' | 'cut' } | null,
+  } as SpreadsheetState,
   reducers: {
-    updateCell(state, action: PayloadAction<{ id: string; value: string }>) {
-      const { id, value } = action.payload;
-      const newHistory = state.history.slice(0, state.historyIndex + 1);
-      newHistory.push(JSON.parse(JSON.stringify(state.data)));
-      state.history = newHistory;
-      state.historyIndex = newHistory.length - 1;
-      
-      if (value[0] === '=') {
-        const res = calculateFormula(state.data, value);
-        state.data[id] = { raw: value, res };
-      } else {
-        state.data[id] = { raw: value, res: value };
-      }
-      state.saveStatus = 'Сохранение...';
-    },
-    
-    undo(state) {
-      if (state.historyIndex > 0) {
-        state.historyIndex--;
-        state.data = JSON.parse(JSON.stringify(state.history[state.historyIndex]));
-        state.saveStatus = 'Сохранение...';
-      }
-    },
-    
-    redo(state) {
-      if (state.historyIndex < state.history.length - 1) {
-        state.historyIndex++;
-        state.data = JSON.parse(JSON.stringify(state.history[state.historyIndex]));
-        state.saveStatus = 'Сохранение...';
-      }
-    },
-    
-    setSaveStatus(state, action: PayloadAction<string>) {
-      state.saveStatus = action.payload;
-    },
-    
-    recalculateAll(state) {
-      state.data = recalculateAll(state.data);
-    },
-    
-    setSelectedCell(state, action: PayloadAction<string>) {
-      state.selectedCell = action.payload;
-    },
-    
-    setSelectedRange(state, action: PayloadAction<string | null>) {
-      state.selectedRange = action.payload;
-    },
-    
-    loadData(state, action: PayloadAction<{ data: Record<string, CellData>; rows: number; cols: number }>) {
+    loadData: (state, action: PayloadAction<{ data: Record<string, CellData>; rows: number; cols: number }>) => {
       state.data = action.payload.data;
       state.rows = action.payload.rows;
       state.cols = action.payload.cols;
       state.history = [];
       state.historyIndex = -1;
+      state.saveStatus = 'saved';
     },
-    
-    addRow(state, action: PayloadAction<number>) {
+    updateCell: (state, action: PayloadAction<{ id: string; value: string }>) => {
+      const { id, value } = action.payload;
+      const newHistory = state.history.slice(0, state.historyIndex + 1);
+      newHistory.push(JSON.parse(JSON.stringify(state.data)));
+      state.history = newHistory;
+      state.historyIndex = newHistory.length - 1;
+
+      if (value[0] === '=') {
+        const res = calculateFormula(state.data, value);
+        state.data[id] = { ...state.data[id], raw: value, res };
+      } else {
+        state.data[id] = { ...state.data[id], raw: value, res: value };
+      }
+      state.saveStatus = 'saving';
+    },
+    updateCellStyle: (state, action: PayloadAction<{ id: string; styles: Partial<CellData> }>) => {
+      const { id, styles } = action.payload;
+      state.data[id] = { ...state.data[id], ...styles };
+      state.saveStatus = 'saving';
+    },
+    updateRangeStyle: (state, action: PayloadAction<{ range: string; styles: Partial<CellData> }>) => {
+      const { range, styles } = action.payload;
+      const [start, end] = range.split(':');
+      const startCol = start.match(/[A-Z]+/)?.[0] || '';
+      const startRow = parseInt(start.match(/\d+/)?.[0] || '0');
+      const endCol = end.match(/[A-Z]+/)?.[0] || '';
+      const endRow = parseInt(end.match(/\d+/)?.[0] || '0');
+      const startIdx = alphabet.indexOf(startCol);
+      const endIdx = alphabet.indexOf(endCol);
+
+      for (let r = startRow; r <= endRow; r++) {
+        for (let c = startIdx; c <= endIdx; c++) {
+          const id = alphabet[c] + r;
+          state.data[id] = { ...state.data[id], ...styles };
+        }
+      }
+      state.saveStatus = 'saving';
+    },
+    setSelectedCell: (state, action: PayloadAction<string>) => {
+      state.selectedCell = action.payload;
+    },
+    setSelectedRange: (state, action: PayloadAction<string | null>) => {
+      state.selectedRange = action.payload;
+    },
+    copyToClipboard: (state, action: PayloadAction<{ range: string; action: 'copy' | 'cut' }>) => {
+      const { range, action: copyAction } = action.payload;
+      const [start, end] = range.split(':');
+      const startCol = start.match(/[A-Z]+/)?.[0] || '';
+      const startRow = parseInt(start.match(/\d+/)?.[0] || '0');
+      const endCol = end.match(/[A-Z]+/)?.[0] || '';
+      const endRow = parseInt(end.match(/\d+/)?.[0] || '0');
+      const startIdx = alphabet.indexOf(startCol);
+      const endIdx = alphabet.indexOf(endCol);
+
+      const copyData: Record<string, CellData> = {};
+      for (let r = startRow; r <= endRow; r++) {
+        for (let c = startIdx; c <= endIdx; c++) {
+          const id = alphabet[c] + r;
+          copyData[id] = { ...state.data[id] };
+        }
+      }
+      state.clipboard = { data: copyData, action: copyAction };
+
+      if (copyAction === 'cut') {
+        for (const id in copyData) {
+          state.data[id] = { ...state.data[id], raw: '', res: '' };
+        }
+      }
+      state.saveStatus = 'saving';
+    },
+    pasteFromClipboard: (state, action: PayloadAction<{ targetCell: string }>) => {
+      if (!state.clipboard) return;
+
+      const { targetCell } = action.payload;
+      const targetCol = targetCell.match(/[A-Z]+/)?.[0] || '';
+      const targetRow = parseInt(targetCell.match(/\d+/)?.[0] || '0');
+      const targetColIdx = alphabet.indexOf(targetCol);
+
+      const copyData = state.clipboard.data;
+      const copyIds = Object.keys(copyData);
+      if (copyIds.length === 0) return;
+
+      const firstCopyId = copyIds[0];
+      const firstCopyCol = firstCopyId.match(/[A-Z]+/)?.[0] || '';
+      const firstCopyRow = parseInt(firstCopyId.match(/\d+/)?.[0] || '0');
+      const offsetRow = targetRow - firstCopyRow;
+      const offsetCol = targetColIdx - alphabet.indexOf(firstCopyCol);
+
+      for (const id of copyIds) {
+        const col = id.match(/[A-Z]+/)?.[0] || '';
+        const row = parseInt(id.match(/\d+/)?.[0] || '0');
+        const newColIdx = alphabet.indexOf(col) + offsetCol;
+        const newRow = row + offsetRow;
+        if (newColIdx >= 0 && newColIdx < alphabet.length && newRow > 0 && newRow <= state.rows) {
+          const newId = alphabet[newColIdx] + newRow;
+          if (state.data[newId]) {
+            state.data[newId] = { ...state.data[newId], ...copyData[id] };
+          }
+          if (state.clipboard?.action === 'cut') {
+            state.data[id] = { ...state.data[id], raw: '', res: '' };
+          }
+        }
+      }
+      state.clipboard = null;
+      state.saveStatus = 'saving';
+    },
+    clearCell: (state, action: PayloadAction<string>) => {
+      const id = action.payload;
+      state.data[id] = { ...state.data[id], raw: '', res: '' };
+      state.saveStatus = 'saving';
+    },
+    undo: (state) => {
+      if (state.historyIndex > 0) {
+        state.historyIndex--;
+        state.data = JSON.parse(JSON.stringify(state.history[state.historyIndex]));
+        state.saveStatus = 'saving';
+      }
+    },
+    redo: (state) => {
+      if (state.historyIndex < state.history.length - 1) {
+        state.historyIndex++;
+        state.data = JSON.parse(JSON.stringify(state.history[state.historyIndex]));
+        state.saveStatus = 'saving';
+      }
+    },
+    setSaveStatus: (state, action: PayloadAction<'saved' | 'saving' | 'error'>) => {
+      state.saveStatus = action.payload;
+    },
+    recalculateAll: (state) => {
+      state.data = recalculateAll(state.data);
+    },
+    addRow: (state, action: PayloadAction<number>) => {
       const after = action.payload;
       const insertAt = after + 1;
       const newData: Record<string, CellData> = {};
@@ -338,15 +717,21 @@ const spreadsheetSlice = createSlice({
         const row = parseInt(key.match(/\d+/)?.[0] || '0');
         if (row <= insertAt) {
           newData[key] = state.data[key];
-        } else {
+        } else if (row > insertAt && row <= state.rows) {
           newData[col + (row + 1)] = state.data[key];
+        }
+      }
+      for (let j = 0; j < state.cols; j++) {
+        const newId = alphabet[j] + (insertAt + 1);
+        if (!newData[newId]) {
+          newData[newId] = createEmptyCell();
         }
       }
       state.data = newData;
       state.rows++;
+      state.saveStatus = 'saving';
     },
-    
-    deleteRow(state, action: PayloadAction<number>) {
+    deleteRow: (state, action: PayloadAction<number>) => {
       const idx = action.payload;
       const targetRow = idx + 1;
       const newData: Record<string, CellData> = {};
@@ -362,61 +747,7 @@ const spreadsheetSlice = createSlice({
       }
       state.data = newData;
       state.rows--;
-    },
-    
-    addColumn(state, action: PayloadAction<number>) {
-      const afterIdx = action.payload;
-      if (state.cols >= alphabet.length) return;
-      
-      const newData: Record<string, CellData> = {};
-      for (let r = 1; r <= state.rows; r++) {
-        for (let c = 0; c < state.cols + 1; c++) {
-          if (c <= afterIdx) {
-            const oldId = alphabet[c] + r;
-            if (state.data[oldId]) {
-              newData[oldId] = state.data[oldId];
-            }
-          } else {
-            const newId = alphabet[c] + r;
-            const oldIdShift = alphabet[c - 1] + r;
-            if (state.data[oldIdShift]) {
-              newData[newId] = state.data[oldIdShift];
-            }
-          }
-        }
-      }
-      
-      for (let r = 1; r <= state.rows; r++) {
-        const newCellId = alphabet[afterIdx + 1] + r;
-        if (!newData[newCellId]) {
-          newData[newCellId] = { raw: '', res: '' };
-        }
-      }
-      
-      state.data = newData;
-      state.cols++;
-    },
-    
-    deleteColumn(state, action: PayloadAction<number>) {
-      const idx = action.payload;
-      const newData: Record<string, CellData> = {};
-      for (const key in state.data) {
-        const col = key.match(/[A-Z]+/)?.[0] || '';
-        const row = parseInt(key.match(/\d+/)?.[0] || '0');
-        const colIdx = alphabet.indexOf(col);
-        
-        if (colIdx === idx) continue;
-        
-        if (colIdx > idx) {
-          const newId = alphabet[colIdx - 1] + row;
-          newData[newId] = state.data[key];
-        } else {
-          newData[key] = state.data[key];
-        }
-      }
-      
-      state.data = newData;
-      state.cols--;
+      state.saveStatus = 'saving';
     },
   },
 });
@@ -429,16 +760,23 @@ const documentsSlice = createSlice({
     currentName: '',
     loading: false,
     error: null as string | null,
-  },
+  } as DocumentsState,
   reducers: {
-    clearError(state) {
+    clearError: (state) => {
       state.error = null;
+    },
+    setCurrentDocument: (state, action: PayloadAction<{ id: number; name: string }>) => {
+      state.currentId = action.payload.id;
+      state.currentName = action.payload.name;
     },
   },
   extraReducers: (builder) => {
     builder
-      .addCase(loadDocuments.pending, (state) => { state.loading = true; })
-      .addCase(loadDocuments.fulfilled, (state, action) => {
+      .addCase(loadUserDocuments.pending, (state) => {
+        state.loading = true;
+        state.error = null;
+      })
+      .addCase(loadUserDocuments.fulfilled, (state, action) => {
         state.list = action.payload;
         state.loading = false;
         if (action.payload.length > 0 && !state.currentId) {
@@ -446,54 +784,73 @@ const documentsSlice = createSlice({
           state.currentName = action.payload[0].name;
         }
       })
-      .addCase(loadDocuments.rejected, (state, action) => {
+      .addCase(loadUserDocuments.rejected, (state, action) => {
         state.loading = false;
-        state.error = action.error.message || 'Ошибка загрузки';
+        state.error = action.payload as string;
       })
-      .addCase(loadDocumentById.pending, (state) => { state.loading = true; })
+      .addCase(loadDocumentById.pending, (state) => {
+        state.loading = true;
+        state.error = null;
+      })
       .addCase(loadDocumentById.fulfilled, (state, action) => {
+        state.loading = false;
         if (action.payload) {
           state.currentId = action.payload.id;
           state.currentName = action.payload.name;
         }
-        state.loading = false;
       })
       .addCase(loadDocumentById.rejected, (state, action) => {
         state.loading = false;
-        state.error = action.error.message || 'Ошибка загрузки документа';
-      })
-      .addCase(saveDocument.fulfilled, (state, action) => {
-        if (action.payload) state.list = action.payload;
-      })
-      .addCase(createDocument.fulfilled, (state, action) => {
-        state.list = action.payload;
-        if (action.payload.length > 0) {
-          const last = action.payload[action.payload.length - 1];
-          state.currentId = last.id;
-          state.currentName = last.name;
+        if (action.payload === '403') {
+          state.error = 'Нет доступа к этому документу';
+        } else {
+          state.error = action.payload as string;
         }
       })
-      .addCase(deleteDocument.fulfilled, (state, action) => {
-        state.list = action.payload;
-        if (action.payload.length > 0 && state.currentId) {
-          const exists = action.payload.some((d: Document) => d.id === state.currentId);
-          if (!exists) {
-            state.currentId = action.payload[0].id;
-            state.currentName = action.payload[0].name;
+      .addCase(createDocumentInStorage.fulfilled, (state, action) => {
+        if (action.payload) {
+          state.list = action.payload.userDocs;
+          state.currentId = action.payload.newDoc.id;
+          state.currentName = action.payload.newDoc.name;
+        }
+      })
+      .addCase(deleteDocumentFromStorage.fulfilled, (state, action) => {
+        if (action.payload) {
+          state.list = action.payload;
+          if (state.list.length > 0 && state.currentId) {
+            const exists = state.list.some(d => d.id === state.currentId);
+            if (!exists) {
+              state.currentId = state.list[0].id;
+              state.currentName = state.list[0].name;
+            }
+          } else if (state.list.length === 0) {
+            state.currentId = null;
+            state.currentName = '';
           }
         }
       })
-      .addCase(renameDocument.fulfilled, (state, action) => {
+      .addCase(renameDocumentInStorage.fulfilled, (state, action) => {
         if (action.payload) {
-          state.list = action.payload.newList;
+          state.list = action.payload.userDocs;
           if (state.currentId === action.payload.id) {
             state.currentName = action.payload.newName;
           }
         }
       })
-      .addCase(duplicateDocument.fulfilled, (state, action) => {
+      .addCase(duplicateDocumentInStorage.fulfilled, (state, action) => {
         if (action.payload) {
           state.list = action.payload;
+        }
+      })
+      .addCase(saveDocumentToStorage.fulfilled, (state, action) => {
+        if (action.payload) {
+          const index = state.list.findIndex(d => d.id === action.payload.id);
+          if (index !== -1) {
+            state.list[index] = action.payload;
+          }
+          if (state.currentId === action.payload.id) {
+            state.currentName = action.payload.name;
+          }
         }
       });
   },
@@ -506,175 +863,498 @@ const uiSlice = createSlice({
     newDocName: '',
     newDocRows: 20,
     newDocCols: 10,
-    contextMenu: { show: false, x: 0, y: 0, row: null as number | null, col: null as number | null },
-  },
+    contextMenu: { show: false, x: 0, y: 0, row: null as number | null },
+    showFormatPanel: true,
+    confirmDialog: null as { show: boolean; message: string; onConfirm: () => void; onCancel: () => void } | null,
+  } as UIState,
   reducers: {
-    setModalOpen: (state) => { state.modalOpen = true; },
-    setModalClose: (state) => { state.modalOpen = false; },
-    setNewDocName: (state, action: PayloadAction<string>) => { state.newDocName = action.payload; },
-    setNewDocRows: (state, action: PayloadAction<number>) => { state.newDocRows = action.payload; },
-    setNewDocCols: (state, action: PayloadAction<number>) => { state.newDocCols = action.payload; },
-    setContextMenu: (state, action: PayloadAction<{ show: boolean; x: number; y: number; row: number | null; col: number | null }>) => {
+    setModalOpen: (state) => {
+      state.modalOpen = true;
+      state.newDocName = '';
+      state.newDocRows = 20;
+      state.newDocCols = 10;
+    },
+    setModalClose: (state) => {
+      state.modalOpen = false;
+    },
+    setNewDocName: (state, action: PayloadAction<string>) => {
+      state.newDocName = action.payload;
+    },
+    setNewDocRows: (state, action: PayloadAction<number>) => {
+      state.newDocRows = action.payload;
+    },
+    setNewDocCols: (state, action: PayloadAction<number>) => {
+      state.newDocCols = Math.min(action.payload, 26);
+    },
+    setContextMenu: (state, action: PayloadAction<{ show: boolean; x: number; y: number; row: number | null }>) => {
       state.contextMenu = action.payload;
+    },
+    setShowFormatPanel: (state, action: PayloadAction<boolean>) => {
+      state.showFormatPanel = action.payload;
+    },
+    showConfirmDialog: (state, action: PayloadAction<{ message: string; onConfirm: () => void; onCancel: () => void }>) => {
+      state.confirmDialog = { show: true, ...action.payload };
+    },
+    hideConfirmDialog: (state) => {
+      state.confirmDialog = null;
     },
   },
 });
 
-const store = configureStore({
-  reducer: {
-    spreadsheet: spreadsheetSlice.reducer,
-    documents: documentsSlice.reducer,
-    ui: uiSlice.reducer,
-  },
+const rootReducer = combineReducers({
+  spreadsheet: spreadsheetSlice.reducer,
+  documents: documentsSlice.reducer,
+  ui: uiSlice.reducer,
+  auth: authSlice.reducer,
 });
 
-type RootState = ReturnType<typeof store.getState>;
-type AppDispatch = typeof store.dispatch;
-const useAppDispatch = () => useDispatch<AppDispatch>();
-const useAppSelector: <T>(selector: (state: RootState) => T) => T = useSelector;
+const store = configureStore({
+  reducer: rootReducer,
+});
 
-const App = () => {
+export type RootState = ReturnType<typeof store.getState>;
+export type AppDispatch = typeof store.dispatch;
+export const useAppDispatch = () => useDispatch<AppDispatch>();
+export const useAppSelector = useSelector as <T>(selector: (state: RootState) => T) => T;
+
+const LoginPage = () => {
   const dispatch = useAppDispatch();
+  const navigate = useNavigate();
+  const location = useLocation();
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [errors, setErrors] = useState<{ email?: string; password?: string }>({});
+  const authError = useAppSelector((state: RootState) => state.auth.error);
+  const loading = useAppSelector((state: RootState) => state.auth.loading);
+
+  const from = (location.state as any)?.from?.pathname || '/dashboard';
+
+  const validate = () => {
+    const newErrors: { email?: string; password?: string } = {};
+    if (!email) newErrors.email = 'Email обязателен';
+    else if (!/\S+@\S+\.\S+/.test(email)) newErrors.email = 'Неверный формат email';
+    if (!password) newErrors.password = 'Пароль обязателен';
+    setErrors(newErrors);
+    return Object.keys(newErrors).length === 0;
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!validate()) return;
+    const result = await dispatch(loginUser({ email, password }));
+    if (loginUser.fulfilled.match(result)) {
+      navigate(from, { replace: true });
+    }
+  };
+
+  return (
+    <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh', background: '#f5f5f5' }}>
+      <div style={{ background: 'white', padding: 40, borderRadius: 8, width: 400, boxShadow: '0 2px 10px rgba(0,0,0,0.1)' }}>
+        <h1 style={{ marginBottom: 20, textAlign: 'center' }}>Вход</h1>
+        <form onSubmit={handleSubmit}>
+          <div style={{ marginBottom: 15 }}>
+            <input
+              type="email"
+              placeholder="Email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              style={{ width: '100%', padding: 10, border: `1px solid ${errors.email ? 'red' : '#ccc'}`, borderRadius: 4 }}
+            />
+            {errors.email && <div style={{ color: 'red', fontSize: 12, marginTop: 5 }}>{errors.email}</div>}
+          </div>
+          <div style={{ marginBottom: 15 }}>
+            <input
+              type="password"
+              placeholder="Пароль"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              style={{ width: '100%', padding: 10, border: `1px solid ${errors.password ? 'red' : '#ccc'}`, borderRadius: 4 }}
+            />
+            {errors.password && <div style={{ color: 'red', fontSize: 12, marginTop: 5 }}>{errors.password}</div>}
+          </div>
+          {authError && <div style={{ color: 'red', marginBottom: 15, textAlign: 'center' }}>{authError}</div>}
+          <button
+            type="submit"
+            disabled={loading}
+            style={{ width: '100%', padding: 12, background: '#007bff', color: 'white', border: 'none', borderRadius: 4, cursor: 'pointer' }}
+          >
+            {loading ? 'Загрузка...' : 'Войти'}
+          </button>
+        </form>
+        <p style={{ marginTop: 20, textAlign: 'center' }}>
+          Нет аккаунта? <Link to="/register">Зарегистрироваться</Link>
+        </p>
+      </div>
+    </div>
+  );
+};
+
+const RegisterPage = () => {
+  const dispatch = useAppDispatch();
+  const navigate = useNavigate();
+  const [name, setName] = useState('');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [errors, setErrors] = useState<{ name?: string; email?: string; password?: string; confirmPassword?: string }>({});
+  const authError = useAppSelector((state: RootState) => state.auth.error);
+  const loading = useAppSelector((state: RootState) => state.auth.loading);
+
+  const validate = () => {
+    const newErrors: typeof errors = {};
+    if (!name) newErrors.name = 'Имя обязательно';
+    if (!email) newErrors.email = 'Email обязателен';
+    else if (!/\S+@\S+\.\S+/.test(email)) newErrors.email = 'Неверный формат email';
+    if (!password) newErrors.password = 'Пароль обязателен';
+    else if (password.length < 8) newErrors.password = 'Пароль должен быть не менее 8 символов';
+    if (password !== confirmPassword) newErrors.confirmPassword = 'Пароли не совпадают';
+    setErrors(newErrors);
+    return Object.keys(newErrors).length === 0;
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!validate()) return;
+    const result = await dispatch(registerUser({ name, email, password }));
+    if (registerUser.fulfilled.match(result)) {
+      navigate('/dashboard');
+    }
+  };
+
+  return (
+    <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh', background: '#f5f5f5' }}>
+      <div style={{ background: 'white', padding: 40, borderRadius: 8, width: 400, boxShadow: '0 2px 10px rgba(0,0,0,0.1)' }}>
+        <h1 style={{ marginBottom: 20, textAlign: 'center' }}>Регистрация</h1>
+        <form onSubmit={handleSubmit}>
+          <div style={{ marginBottom: 15 }}>
+            <input
+              type="text"
+              placeholder="Имя"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              style={{ width: '100%', padding: 10, border: `1px solid ${errors.name ? 'red' : '#ccc'}`, borderRadius: 4 }}
+            />
+            {errors.name && <div style={{ color: 'red', fontSize: 12, marginTop: 5 }}>{errors.name}</div>}
+          </div>
+          <div style={{ marginBottom: 15 }}>
+            <input
+              type="email"
+              placeholder="Email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              style={{ width: '100%', padding: 10, border: `1px solid ${errors.email ? 'red' : '#ccc'}`, borderRadius: 4 }}
+            />
+            {errors.email && <div style={{ color: 'red', fontSize: 12, marginTop: 5 }}>{errors.email}</div>}
+          </div>
+          <div style={{ marginBottom: 15 }}>
+            <input
+              type="password"
+              placeholder="Пароль (мин. 8 символов)"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              style={{ width: '100%', padding: 10, border: `1px solid ${errors.password ? 'red' : '#ccc'}`, borderRadius: 4 }}
+            />
+            {errors.password && <div style={{ color: 'red', fontSize: 12, marginTop: 5 }}>{errors.password}</div>}
+          </div>
+          <div style={{ marginBottom: 15 }}>
+            <input
+              type="password"
+              placeholder="Подтверждение пароля"
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+              style={{ width: '100%', padding: 10, border: `1px solid ${errors.confirmPassword ? 'red' : '#ccc'}`, borderRadius: 4 }}
+            />
+            {errors.confirmPassword && <div style={{ color: 'red', fontSize: 12, marginTop: 5 }}>{errors.confirmPassword}</div>}
+          </div>
+          {authError && <div style={{ color: 'red', marginBottom: 15, textAlign: 'center' }}>{authError}</div>}
+          <button
+            type="submit"
+            disabled={loading}
+            style={{ width: '100%', padding: 12, background: '#28a745', color: 'white', border: 'none', borderRadius: 4, cursor: 'pointer' }}
+          >
+            {loading ? 'Загрузка...' : 'Зарегистрироваться'}
+          </button>
+        </form>
+        <p style={{ marginTop: 20, textAlign: 'center' }}>
+          Уже есть аккаунт? <Link to="/login">Войти</Link>
+        </p>
+      </div>
+    </div>
+  );
+};
+
+const FormatPanel = () => {
+  const dispatch = useAppDispatch();
+  const selectedCell = useAppSelector((state: RootState) => state.spreadsheet.selectedCell);
+  const selectedRange = useAppSelector((state: RootState) => state.spreadsheet.selectedRange);
+  const cellData = useAppSelector((state: RootState) => state.spreadsheet.data[selectedCell] || createEmptyCell());
+
+  const applyStyle = (styles: Partial<CellData>) => {
+    if (selectedRange) {
+      dispatch(spreadsheetSlice.actions.updateRangeStyle({ range: selectedRange, styles }));
+    } else {
+      dispatch(spreadsheetSlice.actions.updateCellStyle({ id: selectedCell, styles }));
+    }
+  };
+
+  return (
+    <div style={{ padding: '8px 12px', background: '#f8f9fa', borderBottom: '1px solid #dee2e6', display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+      <button onClick={() => applyStyle({ bold: !cellData.bold })} style={{ fontWeight: 'bold', padding: '4px 8px', cursor: 'pointer' }}>B</button>
+      <button onClick={() => applyStyle({ italic: !cellData.italic })} style={{ fontStyle: 'italic', padding: '4px 8px', cursor: 'pointer' }}>I</button>
+      <button onClick={() => applyStyle({ underline: !cellData.underline })} style={{ textDecoration: 'underline', padding: '4px 8px', cursor: 'pointer' }}>U</button>
+      <input type="color" value={cellData.bgColor || '#ffffff'} onChange={(e) => applyStyle({ bgColor: e.target.value })} style={{ width: 30, height: 30, cursor: 'pointer' }} />
+      <input type="color" value={cellData.textColor || '#000000'} onChange={(e) => applyStyle({ textColor: e.target.value })} style={{ width: 30, height: 30, cursor: 'pointer' }} />
+      <select value={cellData.align || 'left'} onChange={(e) => applyStyle({ align: e.target.value as any })} style={{ padding: 4, cursor: 'pointer' }}>
+        <option value="left">⬅️</option>
+        <option value="center">⬌</option>
+        <option value="right">➡️</option>
+      </select>
+      <select value={cellData.format || 'number'} onChange={(e) => applyStyle({ format: e.target.value as any })} style={{ padding: 4, cursor: 'pointer' }}>
+        <option value="number">123</option>
+        <option value="percent">%</option>
+        <option value="currency">₽</option>
+        <option value="date">📅</option>
+      </select>
+    </div>
+  );
+};
+
+const DashboardPage = () => {
+  const dispatch = useAppDispatch();
+  const navigate = useNavigate();
+  const documents = useAppSelector((state: RootState) => state.documents.list);
+  const modalOpen = useAppSelector((state: RootState) => state.ui.modalOpen);
+  const newDocName = useAppSelector((state: RootState) => state.ui.newDocName);
+  const newDocRows = useAppSelector((state: RootState) => state.ui.newDocRows);
+  const newDocCols = useAppSelector((state: RootState) => state.ui.newDocCols);
+  const loading = useAppSelector((state: RootState) => state.documents.loading);
+  const error = useAppSelector((state: RootState) => state.documents.error);
+  const token = useAppSelector((state: RootState) => state.auth.token);
+
+  React.useEffect(() => {
+    if (token) {
+      dispatch(loadUserDocuments());
+    }
+  }, [dispatch, token]);
+
+  const getPreview = (data: Record<string, CellData>, rowsCount: number, colsCount: number) => {
+    const preview: string[][] = [];
+    for (let r = 0; r < Math.min(3, rowsCount); r++) {
+      const row: string[] = [];
+      for (let c = 0; c < Math.min(3, colsCount); c++) {
+        const id = alphabet[c] + (r + 1);
+        let val = data[id]?.res || data[id]?.raw || '';
+        if (val.length > 10) val = val.slice(0, 10);
+        row.push(val || '—');
+      }
+      preview.push(row);
+    }
+    return preview;
+  };
+
+  const handleOpenDocument = async (id: number) => {
+    if (!token) return;
+    const result = await dispatch(loadDocumentById({ id, token }));
+    if (loadDocumentById.fulfilled.match(result) && result.payload) {
+      const doc = result.payload;
+      dispatch(spreadsheetSlice.actions.loadData({ data: doc.data, rows: doc.rows, cols: doc.cols }));
+      navigate(`/documents/${id}`);
+    } else if (result.payload === '403') {
+      alert('Нет доступа к этому документу');
+    }
+  };
+
+  const createDoc = () => {
+    if (!newDocName.trim() || !token) return;
+    dispatch(createDocumentInStorage({ name: newDocName, rows: newDocRows, cols: newDocCols, token }));
+    dispatch(uiSlice.actions.setModalClose());
+  };
+
+  const renameDoc = (id: number, currentName: string) => {
+    const newName = prompt('Новое название', currentName);
+    if (newName && newName.trim() && token) {
+      dispatch(renameDocumentInStorage({ id, newName: newName.trim(), token }));
+    }
+  };
+
+  const duplicateDoc = (id: number) => {
+    if (token) {
+      dispatch(duplicateDocumentInStorage({ id, token }));
+    }
+  };
+
+  const deleteDoc = (id: number) => {
+    if (token && confirm('Удалить документ?')) {
+      dispatch(deleteDocumentFromStorage({ id, token }));
+    }
+  };
+
+  if (loading) return <div style={{ padding: 50, textAlign: 'center' }}>Загрузка...</div>;
+
+  return (
+    <div style={{ padding: 30 }}>
+      <h1>Мои документы</h1>
+      {error && <div style={{ color: 'red', marginBottom: 20 }}>{error}</div>}
+      <button onClick={() => dispatch(uiSlice.actions.setModalOpen())} style={{ marginBottom: 20, padding: '8px 16px', cursor: 'pointer' }}>
+        Новый документ
+      </button>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 16 }}>
+        {documents.map((doc) => {
+          const preview = getPreview(doc.data, doc.rows, doc.cols);
+          return (
+            <div key={doc.id} style={{ border: '1px solid #ccc', padding: 12, borderRadius: 8, cursor: 'pointer' }} onClick={() => handleOpenDocument(doc.id)}>
+              <h3>{doc.name}</h3>
+              <div style={{ fontSize: 12, color: '#666' }}>Обновлён: {new Date(doc.updatedAt).toLocaleString()}</div>
+              <div style={{ background: '#f5f5f5', marginTop: 10, padding: 8 }}>
+                {preview.map((row, ri) => (
+                  <div key={ri} style={{ display: 'flex' }}>
+                    {row.map((cell, ci) => (
+                      <div key={ci} style={{ border: '1px solid #ddd', background: 'white', padding: 4, width: 60, textAlign: 'center' }}>{cell}</div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+              <div style={{ marginTop: 10 }}>
+                <button onClick={(e) => { e.stopPropagation(); renameDoc(doc.id, doc.name); }} style={{ marginRight: 8 }}>Переименовать</button>
+                <button onClick={(e) => { e.stopPropagation(); duplicateDoc(doc.id); }} style={{ marginRight: 8 }}>Дублировать</button>
+                <button onClick={(e) => { e.stopPropagation(); deleteDoc(doc.id); }}>Удалить</button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      {modalOpen && (
+        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={() => dispatch(uiSlice.actions.setModalClose())}>
+          <div style={{ background: 'white', padding: 20, borderRadius: 8, width: 300 }} onClick={(e) => e.stopPropagation()}>
+            <h3>Новый документ</h3>
+            <input placeholder="Название" value={newDocName} onChange={(e) => dispatch(uiSlice.actions.setNewDocName(e.target.value))} style={{ width: '100%', margin: '10px 0', padding: 8 }} />
+            <input type="number" placeholder="Строки" value={newDocRows} onChange={(e) => dispatch(uiSlice.actions.setNewDocRows(parseInt(e.target.value) || 1))} style={{ width: '100%', margin: '10px 0', padding: 8 }} />
+            <input type="number" placeholder="Столбцы (max 26)" value={newDocCols} onChange={(e) => dispatch(uiSlice.actions.setNewDocCols(parseInt(e.target.value) || 1))} style={{ width: '100%', margin: '10px 0', padding: 8 }} />
+            <button onClick={createDoc} style={{ marginRight: 8 }}>Создать</button>
+            <button onClick={() => dispatch(uiSlice.actions.setModalClose())}>Отмена</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+const SpreadsheetPage = () => {
+  const { documentId } = useParams<{ documentId: string }>();
+  const dispatch = useAppDispatch();
+  const navigate = useNavigate();
+  const formulaInputRef = useRef<HTMLInputElement>(null);
+  const autoSaveTimer = useRef<ReturnType<typeof setTimeout>>();
+
+  const [shiftStartCell, setShiftStartCell] = useState<string | null>(null);
+  const [editingCell, setEditingCell] = useState<string | null>(null);
+  const [editValue, setEditValue] = useState('');
+  const editInputRef = useRef<HTMLInputElement>(null);
+
+  const [columnWidths, setColumnWidths] = useState<Record<string, number>>(() => {
+    const saved = localStorage.getItem('column_widths');
+    return saved ? JSON.parse(saved) : {};
+  });
+
   const data = useAppSelector((state: RootState) => state.spreadsheet.data);
   const rows = useAppSelector((state: RootState) => state.spreadsheet.rows);
   const cols = useAppSelector((state: RootState) => state.spreadsheet.cols);
   const selectedCell = useAppSelector((state: RootState) => state.spreadsheet.selectedCell);
   const selectedRange = useAppSelector((state: RootState) => state.spreadsheet.selectedRange);
   const saveStatus = useAppSelector((state: RootState) => state.spreadsheet.saveStatus);
-  const documents = useAppSelector((state: RootState) => state.documents.list);
   const currentName = useAppSelector((state: RootState) => state.documents.currentName);
-  const modalOpen = useAppSelector((state: RootState) => state.ui.modalOpen);
-  const newDocName = useAppSelector((state: RootState) => state.ui.newDocName);
-  const newDocRows = useAppSelector((state: RootState) => state.ui.newDocRows);
-  const newDocCols = useAppSelector((state: RootState) => state.ui.newDocCols);
+  const currentId = useAppSelector((state: RootState) => state.documents.currentId);
   const contextMenu = useAppSelector((state: RootState) => state.ui.contextMenu);
-  const loading = useAppSelector((state: RootState) => state.documents.loading);
-  const error = useAppSelector((state: RootState) => state.documents.error);
-  const [showDocList, setShowDocList] = useState(true);
-  const [shiftStartCell, setShiftStartCell] = useState<string | null>(null);
-  const [editingCell, setEditingCell] = useState<string | null>(null);
-  const [editValue, setEditValue] = useState('');
-  const [columnWidths, setColumnWidths] = useState<Record<string, number>>(() => {
-    const saved = localStorage.getItem('column_widths');
-    const defaultWidths: Record<string, number> = {};
-    alphabet.forEach(letter => { defaultWidths[letter] = 90; });
-    return saved ? JSON.parse(saved) : defaultWidths;
-  });
-  
-  const formulaInputRef = useRef<HTMLInputElement>(null);
-  const editInputRef = useRef<HTMLInputElement>(null);
-  const autoSaveTimer = useRef<ReturnType<typeof setTimeout>>();
-  
-  const [resizingCol, setResizingCol] = useState<string | null>(null);
-  const [resizeStartX, setResizeStartX] = useState(0);
-  const [resizeStartWidth, setResizeStartWidth] = useState(0);
-  
-  useEffect(() => {
-    const beforeUnload = (e: BeforeUnloadEvent) => {
-      if (saveStatus === 'Сохранение...') {
-        e.preventDefault();
-        e.returnValue = '';
-      }
-    };
-    window.addEventListener('beforeunload', beforeUnload);
-    return () => window.removeEventListener('beforeunload', beforeUnload);
-  }, [saveStatus]);
-  
-  useEffect(() => {
-    dispatch(loadDocuments());
-  }, [dispatch]);
-  
-  useEffect(() => {
-    if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
-    autoSaveTimer.current = setTimeout(() => {
-      dispatch(saveDocument());
-    }, 500);
-    return () => { if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current); };
-  }, [data, dispatch]);
-  
-  useEffect(() => {
-    const handleUndoRedo = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
-        e.preventDefault();
-        dispatch(spreadsheetSlice.actions.undo());
-        dispatch(spreadsheetSlice.actions.recalculateAll());
-      }
-      if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.shiftKey && e.key === 'Z'))) {
-        e.preventDefault();
-        dispatch(spreadsheetSlice.actions.redo());
-        dispatch(spreadsheetSlice.actions.recalculateAll());
-      }
-      if ((e.ctrlKey || e.metaKey) && e.key === 's') {
-        e.preventDefault();
-        dispatch(saveDocument());
-      }
-    };
-    window.addEventListener('keydown', handleUndoRedo);
-    return () => window.removeEventListener('keydown', handleUndoRedo);
-  }, [dispatch]);
-  
-  useEffect(() => {
-    const handleGlobalMouseMove = (moveEvent: MouseEvent) => {
-      if (resizingCol) {
-        const newWidth = resizeStartWidth + (moveEvent.clientX - resizeStartX);
-        if (newWidth >= 40) {
-          setColumnWidths(prev => {
-            const updated = { ...prev, [resizingCol]: newWidth };
-            localStorage.setItem('column_widths', JSON.stringify(updated));
-            return updated;
-          });
+  const showFormatPanel = useAppSelector((state: RootState) => state.ui.showFormatPanel);
+  const token = useAppSelector((state: RootState) => state.auth.token);
+
+  React.useEffect(() => {
+    if (documentId && token) {
+      const id = parseInt(documentId);
+      dispatch(loadDocumentById({ id, token })).then((result) => {
+        if (loadDocumentById.fulfilled.match(result) && result.payload) {
+          const doc = result.payload;
+          dispatch(spreadsheetSlice.actions.loadData({ data: doc.data, rows: doc.rows, cols: doc.cols }));
+          dispatch(documentsSlice.actions.setCurrentDocument({ id: doc.id, name: doc.name }));
+        } else if (result.payload === '403') {
+          alert('Нет доступа к этому документу');
+          navigate('/dashboard');
         }
-      }
-    };
-    
-    const handleGlobalMouseUp = () => {
-      if (resizingCol) {
-        setResizingCol(null);
-      }
-    };
-    
-    if (resizingCol) {
-      window.addEventListener('mousemove', handleGlobalMouseMove);
-      window.addEventListener('mouseup', handleGlobalMouseUp);
+      });
     }
-    
-    return () => {
-      window.removeEventListener('mousemove', handleGlobalMouseMove);
-      window.removeEventListener('mouseup', handleGlobalMouseUp);
-    };
-  }, [resizingCol, resizeStartX, resizeStartWidth]);
-  
+  }, [dispatch, documentId, token, navigate]);
+
+  React.useEffect(() => {
+    if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
+    if (currentId && token && saveStatus === 'saving') {
+      autoSaveTimer.current = setTimeout(() => {
+        dispatch(saveDocumentToStorage({
+          id: currentId,
+          data,
+          rows,
+          cols,
+          name: currentName,
+          token,
+        })).then(() => {
+          dispatch(spreadsheetSlice.actions.setSaveStatus('saved'));
+        }).catch(() => {
+          dispatch(spreadsheetSlice.actions.setSaveStatus('error'));
+        });
+      }, 500);
+    }
+    return () => { if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current); };
+  }, [data, rows, cols, currentId, currentName, token, saveStatus, dispatch]);
+
   const startResize = (col: string, e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    setResizingCol(col);
-    setResizeStartX(e.clientX);
-    setResizeStartWidth(columnWidths[col] || 90);
+
+    const startX = e.clientX;
+    const startWidth = columnWidths[col] || 90;
+
+    const onMouseMove = (moveEvent: MouseEvent) => {
+      const newWidth = startWidth + (moveEvent.clientX - startX);
+      if (newWidth >= 50) {
+        setColumnWidths(prev => {
+          const updated = { ...prev, [col]: newWidth };
+          localStorage.setItem('column_widths', JSON.stringify(updated));
+          return updated;
+        });
+      }
+    };
+
+    const onMouseUp = () => {
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+    };
+
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
   };
-  
-  const updateCellValue = (id: string, value: string) => {
+
+  const updateCellValue = useCallback((id: string, value: string) => {
     dispatch(spreadsheetSlice.actions.updateCell({ id, value }));
     dispatch(spreadsheetSlice.actions.recalculateAll());
-  };
-  
-  const startEdit = (id: string) => {
+  }, [dispatch]);
+
+  const startEdit = (id: string, currentValue: string) => {
     setEditingCell(id);
-    setEditValue(data[id]?.raw || '');
+    setEditValue(currentValue);
     setTimeout(() => {
       if (editInputRef.current) {
         editInputRef.current.focus();
-        editInputRef.current.select();
+        editInputRef.current.setSelectionRange(currentValue.length, currentValue.length);
       }
     }, 10);
   };
-  
+
   const finishEdit = (id: string) => {
     if (editingCell) {
       updateCellValue(id, editValue);
       setEditingCell(null);
     }
   };
-  
+
   const handleEditKeyDown = (e: React.KeyboardEvent, id: string) => {
     if (e.key === 'Enter') {
       e.preventDefault();
@@ -684,20 +1364,19 @@ const App = () => {
       setEditingCell(null);
     }
   };
-  
+
   const handleCellClick = (id: string, e: React.MouseEvent) => {
     const target = e.target as HTMLElement;
     if (target.classList?.contains('resize-handle')) return;
-    
+
     if (e.shiftKey && shiftStartCell) {
-      const range = `${shiftStartCell}:${id}`;
-      dispatch(spreadsheetSlice.actions.setSelectedRange(range));
+      dispatch(spreadsheetSlice.actions.setSelectedRange(`${shiftStartCell}:${id}`));
     } else {
       setShiftStartCell(id);
       dispatch(spreadsheetSlice.actions.setSelectedCell(id));
       dispatch(spreadsheetSlice.actions.setSelectedRange(null));
     }
-    
+
     const allCells = document.querySelectorAll('.cell');
     for (let i = 0; i < allCells.length; i++) {
       (allCells[i] as HTMLElement).style.background = '';
@@ -708,74 +1387,33 @@ const App = () => {
       formulaInputRef.current.value = data[id]?.raw || '';
     }
   };
-  
-  const handleRowContextMenu = (e: React.MouseEvent, rowIndex: number) => {
+
+  const handleContextMenu = (e: React.MouseEvent, rowIndex: number) => {
     e.preventDefault();
-    dispatch(uiSlice.actions.setContextMenu({ show: true, x: e.clientX, y: e.clientY, row: rowIndex, col: null }));
+    dispatch(uiSlice.actions.setContextMenu({ show: true, x: e.clientX, y: e.clientY, row: rowIndex }));
   };
-  
-  const handleColContextMenu = (e: React.MouseEvent, colIndex: number) => {
-    e.preventDefault();
-    dispatch(uiSlice.actions.setContextMenu({ show: true, x: e.clientX, y: e.clientY, row: null, col: colIndex }));
-  };
-  
+
   const addRowBelow = (afterIndex: number) => {
     dispatch(spreadsheetSlice.actions.addRow(afterIndex));
     dispatch(spreadsheetSlice.actions.recalculateAll());
-    dispatch(uiSlice.actions.setContextMenu({ show: false, x: 0, y: 0, row: null, col: null }));
+    dispatch(uiSlice.actions.setContextMenu({ show: false, x: 0, y: 0, row: null }));
   };
-  
-  const deleteRowAt = (rowIndex: number) => {
-    dispatch(spreadsheetSlice.actions.deleteRow(rowIndex));
-    dispatch(spreadsheetSlice.actions.recalculateAll());
-    dispatch(uiSlice.actions.setContextMenu({ show: false, x: 0, y: 0, row: null, col: null }));
-  };
-  
-  const addColumnAfter = (afterIndex: number) => {
-    dispatch(spreadsheetSlice.actions.addColumn(afterIndex));
-    dispatch(spreadsheetSlice.actions.recalculateAll());
-    dispatch(uiSlice.actions.setContextMenu({ show: false, x: 0, y: 0, row: null, col: null }));
-  };
-  
-  const deleteColumnAt = (colIndex: number) => {
-    dispatch(spreadsheetSlice.actions.deleteColumn(colIndex));
-    dispatch(spreadsheetSlice.actions.recalculateAll());
-    dispatch(uiSlice.actions.setContextMenu({ show: false, x: 0, y: 0, row: null, col: null }));
-  };
-  
-  const getPreview = (docData: Record<string, CellData>, rowsCount: number, colsCount: number) => {
-    const preview: string[][] = [];
-    for (let r = 0; r < Math.min(3, rowsCount); r++) {
-      const row: string[] = [];
-      for (let c = 0; c < Math.min(3, colsCount); c++) {
-        const id = alphabet[c] + (r + 1);
-        let val = docData[id]?.res || docData[id]?.raw || '';
-        if (val.length > 10) val = val.slice(0, 10);
-        row.push(val || '—');
-      }
-      preview.push(row);
+
+  const removeRow = (rowIndex: number) => {
+    if (rows > 1) {
+      dispatch(spreadsheetSlice.actions.deleteRow(rowIndex));
+      dispatch(spreadsheetSlice.actions.recalculateAll());
     }
-    return preview;
+    dispatch(uiSlice.actions.setContextMenu({ show: false, x: 0, y: 0, row: null }));
   };
-  
-  const handleOpenDocument = async (id: number) => {
-    const result = await dispatch(loadDocumentById(id));
-    if (loadDocumentById.fulfilled.match(result)) {
-      setShowDocList(false);
+
+  const getDisplayValue = (cell: CellData): string => {
+    if (cell.format && cell.format !== 'number' && !isNaN(parseFloat(cell.res))) {
+      return formatCellValue(cell.res, cell.format);
     }
+    return cell.res || cell.raw || '';
   };
-  
-  const createNewDoc = () => {
-    if (!newDocName.trim()) return;
-    dispatch(createDocument({ name: newDocName, rows: newDocRows, cols: newDocCols }));
-    dispatch(uiSlice.actions.setModalClose());
-    
-    const newWidths: Record<string, number> = {};
-    alphabet.forEach(letter => { newWidths[letter] = 90; });
-    setColumnWidths(newWidths);
-    localStorage.setItem('column_widths', JSON.stringify(newWidths));
-  };
-  
+
   const exportToCSV = () => {
     let csvText = '';
     for (let r = 0; r < rows; r++) {
@@ -798,7 +1436,7 @@ const App = () => {
     a.click();
     URL.revokeObjectURL(url);
   };
-  
+
   const exportToJSON = () => {
     const toSave = { name: currentName, rows, cols, data };
     const blob = new Blob([JSON.stringify(toSave, null, 2)], { type: 'application/json' });
@@ -809,7 +1447,7 @@ const App = () => {
     a.click();
     URL.revokeObjectURL(url);
   };
-  
+
   const importFromCSV = () => {
     const input = document.createElement('input');
     input.type = 'file';
@@ -823,119 +1461,210 @@ const App = () => {
         const lines = text.split(/\r?\n/);
         const newRowsCount = Math.min(lines.length, 200);
         for (let r = 0; r < newRowsCount; r++) {
-          const csvCols = lines[r].split(',');
-          for (let c = 0; c < csvCols.length && c < cols; c++) {
+          const colsData = lines[r].split(',');
+          for (let c = 0; c < colsData.length && c < cols; c++) {
             const id = alphabet[c] + (r + 1);
-            const rawValue = csvCols[c].replace(/^"|"$/g, '');
-            dispatch(spreadsheetSlice.actions.updateCell({ id, value: rawValue }));
+            const rawValue = colsData[c].replace(/^"|"$/g, '');
+            updateCellValue(id, rawValue);
           }
         }
-        dispatch(spreadsheetSlice.actions.recalculateAll());
       };
       reader.readAsText(file, 'UTF-8');
     };
     input.click();
   };
-  
-  if (showDocList) {
-    return (
-      <div style={{ padding: 30 }}>
-        <h1>Мои документы</h1>
-        {error && <div style={{ color: 'red', marginBottom: 20 }}>{error}</div>}
-        <button onClick={() => dispatch(uiSlice.actions.setModalOpen())} style={{ marginBottom: 20, padding: '8px 16px', cursor: 'pointer' }}>
-          Новый документ
-        </button>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 16 }}>
-          {documents.map((doc: Document) => {
-            const preview = getPreview(doc.data, doc.rows, doc.cols);
-            return (
-              <div key={doc.id} style={{ border: '1px solid #ccc', padding: 12, borderRadius: 8, cursor: 'pointer' }} onClick={() => handleOpenDocument(doc.id)}>
-                <h3>{doc.name}</h3>
-                <div style={{ fontSize: 12, color: '#666' }}>Обновлён: {new Date(doc.updatedAt).toLocaleString()}</div>
-                <div style={{ background: '#f5f5f5', marginTop: 10, padding: 8 }}>
-                  {preview.map((row, ri) => (
-                    <div key={ri} style={{ display: 'flex' }}>
-                      {row.map((cell, ci) => (
-                        <div key={ci} style={{ border: '1px solid #ddd', background: 'white', padding: 4, width: 60, textAlign: 'center' }}>{cell}</div>
-                      ))}
-                    </div>
-                  ))}
-                </div>
-                <div style={{ marginTop: 10 }}>
-                  <button onClick={(e) => { e.stopPropagation(); dispatch(renameDocument({ id: doc.id, newName: prompt('Новое название') || '' })); }}>Переименовать</button>
-                  <button onClick={(e) => { e.stopPropagation(); dispatch(duplicateDocument(doc.id)); }}>Дублировать</button>
-                  <button onClick={(e) => { e.stopPropagation(); dispatch(deleteDocument(doc.id)); }}>Удалить</button>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-        {modalOpen && (
-          <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={() => dispatch(uiSlice.actions.setModalClose())}>
-            <div style={{ background: 'white', padding: 20, borderRadius: 8, width: 300 }} onClick={(e) => e.stopPropagation()}>
-              <h3>Новый документ</h3>
-              <input placeholder="Название" value={newDocName} onChange={(e) => dispatch(uiSlice.actions.setNewDocName(e.target.value))} style={{ width: '100%', margin: '10px 0', padding: 8 }} />
-              <input type="number" placeholder="Строки" value={newDocRows} onChange={(e) => dispatch(uiSlice.actions.setNewDocRows(parseInt(e.target.value) || 1))} style={{ width: '100%', margin: '10px 0', padding: 8 }} />
-              <input type="number" placeholder="Столбцы (max 26)" value={newDocCols} onChange={(e) => dispatch(uiSlice.actions.setNewDocCols(Math.min(parseInt(e.target.value) || 1, 26)))} style={{ width: '100%', margin: '10px 0', padding: 8 }} />
-              <button onClick={createNewDoc}>Создать</button>
-              <button onClick={() => dispatch(uiSlice.actions.setModalClose())}>Отмена</button>
-            </div>
-          </div>
-        )}
-      </div>
-    );
-  }
-  
-  const visibleCols = alphabet.slice(0, cols);
-  
+
+  const saveDocManually = () => {
+    if (currentId && token) {
+      dispatch(spreadsheetSlice.actions.setSaveStatus('saving'));
+      dispatch(saveDocumentToStorage({
+        id: currentId,
+        data,
+        rows,
+        cols,
+        name: currentName,
+        token,
+      })).then(() => {
+        dispatch(spreadsheetSlice.actions.setSaveStatus('saved'));
+      }).catch(() => {
+        dispatch(spreadsheetSlice.actions.setSaveStatus('error'));
+      });
+    }
+  };
+
+  React.useEffect(() => {
+    const handleHotkeys = (e: KeyboardEvent) => {
+      if (editingCell) return;
+
+      if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        dispatch(spreadsheetSlice.actions.undo());
+        dispatch(spreadsheetSlice.actions.recalculateAll());
+      }
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.shiftKey && e.key === 'Z'))) {
+        e.preventDefault();
+        dispatch(spreadsheetSlice.actions.redo());
+        dispatch(spreadsheetSlice.actions.recalculateAll());
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+        e.preventDefault();
+        saveDocManually();
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
+        e.preventDefault();
+        if (selectedRange) {
+          dispatch(spreadsheetSlice.actions.copyToClipboard({ range: selectedRange, action: 'copy' }));
+        }
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === 'x') {
+        e.preventDefault();
+        if (selectedRange) {
+          dispatch(spreadsheetSlice.actions.copyToClipboard({ range: selectedRange, action: 'cut' }));
+        }
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
+        e.preventDefault();
+        dispatch(spreadsheetSlice.actions.pasteFromClipboard({ targetCell: selectedCell }));
+        dispatch(spreadsheetSlice.actions.recalculateAll());
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === 'b') {
+        e.preventDefault();
+        const cell = data[selectedCell];
+        if (selectedRange) {
+          dispatch(spreadsheetSlice.actions.updateRangeStyle({ range: selectedRange, styles: { bold: !cell?.bold } }));
+        } else {
+          dispatch(spreadsheetSlice.actions.updateCellStyle({ id: selectedCell, styles: { bold: !cell?.bold } }));
+        }
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === 'i') {
+        e.preventDefault();
+        const cell = data[selectedCell];
+        if (selectedRange) {
+          dispatch(spreadsheetSlice.actions.updateRangeStyle({ range: selectedRange, styles: { italic: !cell?.italic } }));
+        } else {
+          dispatch(spreadsheetSlice.actions.updateCellStyle({ id: selectedCell, styles: { italic: !cell?.italic } }));
+        }
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === 'u') {
+        e.preventDefault();
+        const cell = data[selectedCell];
+        if (selectedRange) {
+          dispatch(spreadsheetSlice.actions.updateRangeStyle({ range: selectedRange, styles: { underline: !cell?.underline } }));
+        } else {
+          dispatch(spreadsheetSlice.actions.updateCellStyle({ id: selectedCell, styles: { underline: !cell?.underline } }));
+        }
+      }
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        e.preventDefault();
+        if (selectedRange) {
+          const [start, end] = selectedRange.split(':');
+          const startCol = start.match(/[A-Z]+/)?.[0] || '';
+          const startRow = parseInt(start.match(/\d+/)?.[0] || '0');
+          const endCol = end.match(/[A-Z]+/)?.[0] || '';
+          const endRow = parseInt(end.match(/\d+/)?.[0] || '0');
+          const startIdx = alphabet.indexOf(startCol);
+          const endIdx = alphabet.indexOf(endCol);
+          for (let r = startRow; r <= endRow; r++) {
+            for (let c = startIdx; c <= endIdx; c++) {
+              const id = alphabet[c] + r;
+              if (data[id]) {
+                dispatch(spreadsheetSlice.actions.clearCell(id));
+              }
+            }
+          }
+        } else {
+          if (data[selectedCell]) {
+            dispatch(spreadsheetSlice.actions.clearCell(selectedCell));
+          }
+        }
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
+        e.preventDefault();
+        const startId = 'A1';
+        const endId = alphabet[cols - 1] + rows;
+        dispatch(spreadsheetSlice.actions.setSelectedRange(`${startId}:${endId}`));
+      }
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        const col = selectedCell.match(/[A-Z]+/)?.[0] || '';
+        const row = parseInt(selectedCell.match(/\d+/)?.[0] || '0');
+        const colIdx = alphabet.indexOf(col);
+        if (colIdx < cols - 1) {
+          dispatch(spreadsheetSlice.actions.setSelectedCell(alphabet[colIdx + 1] + row));
+        } else {
+          dispatch(spreadsheetSlice.actions.setSelectedCell('A' + (row + 1)));
+        }
+      }
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        const row = parseInt(selectedCell.match(/\d+/)?.[0] || '0');
+        if (row < rows) {
+          dispatch(spreadsheetSlice.actions.setSelectedCell('A' + (row + 1)));
+        }
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        dispatch(spreadsheetSlice.actions.setSelectedRange(null));
+        setEditingCell(null);
+      }
+    };
+
+    window.addEventListener('keydown', handleHotkeys);
+    return () => window.removeEventListener('keydown', handleHotkeys);
+  }, [dispatch, selectedCell, selectedRange, rows, cols, data, editingCell, saveDocManually]);
+
+  const visibleCols = useMemo(() => alphabet.slice(0, cols), [cols]);
+
   return (
-    <div className="container" onClick={() => dispatch(uiSlice.actions.setContextMenu({ show: false, x: 0, y: 0, row: null, col: null }))}>
+    <div className="container" onClick={() => dispatch(uiSlice.actions.setContextMenu({ show: false, x: 0, y: 0, row: null }))}>
       <div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 12px', background: '#f8f9fa', borderBottom: '1px solid #dee2e6' }}>
         <div>
-          <button onClick={() => setShowDocList(true)} style={{ marginRight: 12, cursor: 'pointer' }}>К списку</button>
+          <button onClick={() => navigate('/dashboard')} style={{ marginRight: 12, cursor: 'pointer' }}>К списку</button>
           <strong>{currentName}</strong>
-          <span style={{ marginLeft: 12, fontSize: 12, color: saveStatus === 'Сохранено' ? 'green' : 'orange' }}>{saveStatus}</span>
+          <span style={{ marginLeft: 12, fontSize: 12, color: saveStatus === 'saved' ? 'green' : saveStatus === 'saving' ? 'orange' : 'red' }}>
+            {saveStatus === 'saved' ? 'Сохранено' : saveStatus === 'saving' ? 'Сохранение...' : 'Ошибка'}
+          </span>
         </div>
         <div>
-          <button onClick={exportToCSV} style={{ cursor: 'pointer' }}>CSV</button>
-          <button onClick={exportToJSON} style={{ cursor: 'pointer' }}>JSON</button>
-          <button onClick={importFromCSV} style={{ cursor: 'pointer' }}>Импорт CSV</button>
-          <button onClick={() => dispatch(saveDocument())} style={{ cursor: 'pointer' }}>Сохранить (Ctrl+S)</button>
+          <button onClick={exportToCSV} style={{ cursor: 'pointer', marginRight: 8 }}>CSV</button>
+          <button onClick={exportToJSON} style={{ cursor: 'pointer', marginRight: 8 }}>JSON</button>
+          <button onClick={importFromCSV} style={{ cursor: 'pointer', marginRight: 8 }}>Импорт CSV</button>
+          <button onClick={saveDocManually} style={{ cursor: 'pointer', marginRight: 8 }}>Сохранить (Ctrl+S)</button>
+          <button onClick={() => dispatch(uiSlice.actions.setShowFormatPanel(!showFormatPanel))} style={{ cursor: 'pointer' }}>📐 Формат</button>
         </div>
       </div>
-      
+
+      {showFormatPanel && <FormatPanel />}
+
       <div className="formula-bar">
         <div className="cell-ref">{selectedCell}</div>
-        <input ref={formulaInputRef} className="formula-input" onChange={(e) => updateCellValue(selectedCell, e.target.value)} />
+        <input
+          ref={formulaInputRef}
+          className="formula-input"
+          value={data[selectedCell]?.raw || ''}
+          onChange={(e) => updateCellValue(selectedCell, e.target.value)}
+        />
       </div>
-      
+
       <div className="table-wrapper">
         <table>
           <thead>
             <tr>
-              <th className="corner" style={{ position: 'sticky', left: 0, zIndex: 20, width: 50 }}>#</th>
-              {visibleCols.map((letter, idx) => (
-                <th
-                  key={letter}
-                  style={{
-                    width: columnWidths[letter] || 90,
-                    minWidth: 50,
-                    position: 'relative',
-                  }}
-                  onContextMenu={(e) => handleColContextMenu(e, idx)}
-                >
+              <th className="corner">#</th>
+              {visibleCols.map(letter => (
+                <th key={letter} style={{ width: columnWidths[letter] || 90, position: 'relative', minWidth: 50 }}>
                   {letter}
                   <div
                     className="resize-handle"
                     style={{
                       position: 'absolute',
-                      right: -4,
+                      right: -3,
                       top: 0,
-                      width: 8,
+                      width: 6,
                       height: '100%',
                       cursor: 'col-resize',
                       zIndex: 20,
-                      backgroundColor: 'rgba(0,0,0,0.1)',
+                      backgroundColor: 'transparent',
                     }}
                     onMouseDown={(e) => startResize(letter, e)}
                   />
@@ -946,29 +1675,29 @@ const App = () => {
           <tbody>
             {Array.from({ length: rows }).map((_, rowIndex) => (
               <tr key={rowIndex}>
-                <th
-                  className="row-header"
-                  style={{ position: 'sticky', left: 0, zIndex: 10 }}
-                  onContextMenu={(e) => handleRowContextMenu(e, rowIndex)}
-                >
-                  {rowIndex + 1}
-                </th>
+                <th className="row-header" onContextMenu={(e) => handleContextMenu(e, rowIndex)}>{rowIndex + 1}</th>
                 {visibleCols.map((letter) => {
                   const cellId = letter + (rowIndex + 1);
-                  const cell = data[cellId] || { raw: '', res: '' };
-                  const isSelected = selectedRange?.includes(cellId) || selectedCell === cellId;
-                  
+                  const cell = data[cellId] || createEmptyCell();
+
+                  const cellStyle: React.CSSProperties = {
+                    fontWeight: cell.bold ? 'bold' : 'normal',
+                    fontStyle: cell.italic ? 'italic' : 'normal',
+                    textDecoration: cell.underline ? 'underline' : 'none',
+                    backgroundColor: cell.bgColor || '#ffffff',
+                    color: cell.textColor || '#000000',
+                    textAlign: (cell.align as any) || 'left',
+                    width: columnWidths[letter] || 90,
+                  };
+
                   return (
                     <td
                       key={cellId}
                       id={`cell-${cellId}`}
                       className="cell"
-                      style={{
-                        width: columnWidths[letter] || 90,
-                        backgroundColor: isSelected ? '#e3f2fd' : 'white',
-                      }}
+                      style={cellStyle}
                       onClick={(e) => handleCellClick(cellId, e)}
-                      onDoubleClick={() => startEdit(cellId)}
+                      onDoubleClick={() => startEdit(cellId, cell.raw || '')}
                     >
                       {editingCell === cellId ? (
                         <input
@@ -993,7 +1722,7 @@ const App = () => {
                         />
                       ) : (
                         <div className="cell-content" style={{ cursor: 'text' }}>
-                          {cell.res || cell.raw || ''}
+                          {getDisplayValue(cell)}
                         </div>
                       )}
                     </td>
@@ -1004,34 +1733,170 @@ const App = () => {
           </tbody>
         </table>
       </div>
-      
+
       {contextMenu.show && contextMenu.row !== null && (
         <div className="context-menu" style={{ top: contextMenu.y, left: contextMenu.x }}>
           <div onClick={() => addRowBelow(contextMenu.row!)} style={{ cursor: 'pointer' }}>Добавить строку ниже</div>
-          <div onClick={() => deleteRowAt(contextMenu.row!)} style={{ cursor: 'pointer' }}>Удалить строку</div>
+          <div onClick={() => removeRow(contextMenu.row!)} style={{ cursor: 'pointer' }}>Удалить строку</div>
           <hr />
-          <div onClick={() => dispatch(uiSlice.actions.setContextMenu({ show: false, x: 0, y: 0, row: null, col: null }))} style={{ cursor: 'pointer' }}>Отмена</div>
-        </div>
-      )}
-      
-      {contextMenu.show && contextMenu.col !== null && (
-        <div className="context-menu" style={{ top: contextMenu.y, left: contextMenu.x }}>
-          <div onClick={() => addColumnAfter(contextMenu.col!)} style={{ cursor: 'pointer' }}>Добавить столбец справа</div>
-          <div onClick={() => deleteColumnAt(contextMenu.col!)} style={{ cursor: 'pointer' }}>Удалить столбец</div>
-          <hr />
-          <div onClick={() => dispatch(uiSlice.actions.setContextMenu({ show: false, x: 0, y: 0, row: null, col: null }))} style={{ cursor: 'pointer' }}>Отмена</div>
+          <div onClick={() => dispatch(uiSlice.actions.setContextMenu({ show: false, x: 0, y: 0, row: null }))} style={{ cursor: 'pointer' }}>Отмена</div>
         </div>
       )}
     </div>
   );
 };
 
-function RootApp() {
+const ProfilePage = () => {
+  const dispatch = useAppDispatch();
+  const user = useAppSelector((state: RootState) => state.auth.user);
+  const documents = useAppSelector((state: RootState) => state.documents.list);
+  const [newName, setNewName] = useState('');
+  const [oldPassword, setOldPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [nameMessage, setNameMessage] = useState('');
+  const [passwordMessage, setPasswordMessage] = useState('');
+  const authError = useAppSelector((state: RootState) => state.auth.error);
+
+  const handleChangeName = async () => {
+    if (!newName.trim() || !user) return;
+    const result = await dispatch(updateUserName({ userId: user.id, newName: newName.trim() }));
+    if (updateUserName.fulfilled.match(result)) {
+      setNameMessage('Имя изменено');
+      setTimeout(() => setNameMessage(''), 3000);
+      setNewName('');
+    } else {
+      setNameMessage('Ошибка');
+    }
+  };
+
+  const handleChangePassword = async () => {
+    if (!user) return;
+    if (newPassword !== confirmPassword) {
+      setPasswordMessage('Пароли не совпадают');
+      return;
+    }
+    if (newPassword.length < 8) {
+      setPasswordMessage('Пароль должен быть не менее 8 символов');
+      return;
+    }
+    const result = await dispatch(changePassword({ userId: user.id, oldPassword, newPassword }));
+    if (changePassword.fulfilled.match(result)) {
+      setPasswordMessage('Пароль изменён');
+      setOldPassword('');
+      setNewPassword('');
+      setConfirmPassword('');
+    } else {
+      setPasswordMessage(authError || 'Ошибка смены пароля');
+    }
+    setTimeout(() => setPasswordMessage(''), 3000);
+  };
+
+  return (
+    <div style={{ padding: 30, maxWidth: 600, margin: '0 auto' }}>
+      <h1>Профиль</h1>
+      <div style={{ marginTop: 20, padding: 20, background: '#f8f9fa', borderRadius: 8 }}>
+        <p><strong>Имя:</strong> {user?.name}</p>
+        <p><strong>Email:</strong> {user?.email}</p>
+        <p><strong>Количество документов:</strong> {documents.length}</p>
+        <p><strong>Дата регистрации:</strong> {user?.createdAt ? new Date(user.createdAt).toLocaleDateString('ru-RU') : '—'}</p>
+      </div>
+
+      <div style={{ marginTop: 30 }}>
+        <h3>Изменить имя</h3>
+        <div style={{ display: 'flex', gap: 10, marginTop: 10 }}>
+          <input type="text" placeholder="Новое имя" value={newName} onChange={(e) => setNewName(e.target.value)} style={{ flex: 1, padding: 8, border: '1px solid #ccc', borderRadius: 4 }} />
+          <button onClick={handleChangeName} style={{ padding: '8px 16px', cursor: 'pointer' }}>Сохранить</button>
+        </div>
+        {nameMessage && <div style={{ color: nameMessage.includes('изменено') ? 'green' : 'red', marginTop: 5 }}>{nameMessage}</div>}
+      </div>
+
+      <div style={{ marginTop: 30 }}>
+        <h3>Сменить пароль</h3>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 10 }}>
+          <input type="password" placeholder="Старый пароль" value={oldPassword} onChange={(e) => setOldPassword(e.target.value)} style={{ padding: 8, border: '1px solid #ccc', borderRadius: 4 }} />
+          <input type="password" placeholder="Новый пароль (мин. 8 символов)" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} style={{ padding: 8, border: '1px solid #ccc', borderRadius: 4 }} />
+          <input type="password" placeholder="Подтверждение пароля" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} style={{ padding: 8, border: '1px solid #ccc', borderRadius: 4 }} />
+          <button onClick={handleChangePassword} style={{ padding: '8px 16px', cursor: 'pointer', alignSelf: 'flex-start' }}>Сменить пароль</button>
+        </div>
+        {passwordMessage && <div style={{ color: passwordMessage.includes('изменён') ? 'green' : 'red', marginTop: 5 }}>{passwordMessage}</div>}
+      </div>
+    </div>
+  );
+};
+
+const NotFoundPage = () => (
+  <div style={{ textAlign: 'center', padding: 50 }}>
+    <h1>404</h1>
+    <Link to="/dashboard">Вернуться</Link>
+  </div>
+);
+
+const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
+  const isAuth = useAppSelector((state: RootState) => state.auth.isAuthenticated);
+  const location = useLocation();
+
+  if (!isAuth) {
+    return <Navigate to="/login" state={{ from: location }} replace />;
+  }
+  return <>{children}</>;
+};
+
+const AppLayout = () => {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const dispatch = useAppDispatch();
+  const currentName = useAppSelector((state: RootState) => state.documents.currentName);
+  const user = useAppSelector((state: RootState) => state.auth.user);
+
+  const getBreadcrumbs = () => {
+    if (location.pathname === '/dashboard') return <span>Мои документы</span>;
+    if (location.pathname.includes('/documents/')) return <span><Link to="/dashboard">Мои документы</Link> → {currentName || 'Документ'}</span>;
+    if (location.pathname === '/profile') return <span>Профиль</span>;
+    return null;
+  };
+
+  const handleLogout = () => {
+    dispatch(authSlice.actions.logout());
+    navigate('/login');
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 20px', background: '#2c3e50', color: 'white' }}>
+        <div style={{ display: 'flex', gap: 20 }}>
+          <Link to="/dashboard" style={{ color: 'white', textDecoration: 'none' }}>Таблицы</Link>
+          <Link to="/profile" style={{ color: 'white', textDecoration: 'none' }}>Профиль</Link>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 20 }}>
+          <span>{user?.name}</span>
+          <button onClick={handleLogout} style={{ background: '#e74c3c', color: 'white', border: 'none', padding: '6px 12px', borderRadius: 4, cursor: 'pointer' }}>Выйти</button>
+        </div>
+      </div>
+      <div style={{ padding: '8px 20px', background: '#ecf0f1', fontSize: 14 }}>{getBreadcrumbs()}</div>
+      <div style={{ flex: 1, overflow: 'auto' }}><Outlet /></div>
+    </div>
+  );
+};
+
+function App() {
   return (
     <Provider store={store}>
-      <App />
+      <BrowserRouter>
+        <Routes>
+          <Route path="/" element={<Navigate to="/dashboard" replace />} />
+          <Route path="/login" element={<LoginPage />} />
+          <Route path="/register" element={<RegisterPage />} />
+          <Route element={<ProtectedRoute><AppLayout /></ProtectedRoute>}>
+            <Route path="/dashboard" element={<DashboardPage />} />
+            <Route path="/documents/:documentId" element={<SpreadsheetPage />} />
+            <Route path="/profile" element={<ProfilePage />} />
+          </Route>
+          <Route path="*" element={<NotFoundPage />} />
+        </Routes>
+      </BrowserRouter>
     </Provider>
   );
 }
 
-export default RootApp;
+export default App;
